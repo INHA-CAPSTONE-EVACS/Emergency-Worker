@@ -204,6 +204,70 @@ describe('reliable stream consumption', () => {
     expect(await redis.xlen(config.dlqStream)).toBe(0);
   });
 
+  test('predecessor waits preserve the ordinary scheduler retry budget across consumer replacement', async () => {
+    let failNextLeg = false;
+    let schedulerFailures = 0;
+    const routed: string[] = [];
+    const subscriber = new EmergencyEventSubscriber(new DispatchLifecycleService(redis, store, {
+      requestImmediate: async id => {
+        if (failNextLeg) { schedulerFailures++; throw new Error('scheduler temporarily unavailable'); }
+        routed.push(id);
+      },
+    }));
+    const activation: EmergencyEvent = {eventId: 'activate', eventType: 'EMERGENCY_DISPATCHED', schemaVersion: 1,
+      occurredAt: new Date().toISOString(), producer: 'dispatch-service', payload: {emergencyId: 'emergency-1',
+        dispatchId: 'ordering', vehicleId: 'ambulance-1', origin: {latitude: 37, longitude: 126},
+        destination: {latitude: 38, longitude: 127}}};
+    await subscriber.handle(activation);
+    const transporting: EmergencyEvent = {...activation, eventId: 'transport', eventType: 'EMERGENCY_STATUS_CHANGED',
+      payload: {emergencyId: 'emergency-1', dispatchId: 'ordering', previousStatus: 'ARRIVED', currentStatus: 'TRANSPORTING',
+        destination: {latitude: 39, longitude: 128}}};
+    await redis.xadd(config.emergencyStream, '*', 'event', JSON.stringify(transporting));
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP, settings(), subscriber.handle);
+    await consumer.start();
+    await waitUntil(async () => {
+      const entries = await redis.xpending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP, '-', '+', 1) as [string, string, number, number][];
+      return (entries[0]?.[3] ?? 0) > settings().maxDeliveries;
+    });
+    await consumer.stop();
+    await subscriber.handle({...transporting, eventId: 'arrive', payload: {emergencyId: 'emergency-1', dispatchId: 'ordering',
+      previousStatus: 'DISPATCHED', currentStatus: 'ARRIVED'}});
+    failNextLeg = true;
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP,
+      {...settings(), consumerName: 'first-scheduler-attempt'}, subscriber.handle);
+    await consumer.start();
+    await waitUntil(async () => schedulerFailures > 0);
+    await consumer.stop();
+    expect(schedulerFailures).toBe(1);
+    expect(await pending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP)).toBe(1);
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
+    failNextLeg = false;
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP,
+      {...settings(), consumerName: 'scheduler-recovery'}, subscriber.handle);
+    await consumer.start();
+    await waitUntil(async () => await pending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP) === 0);
+    expect(routed).toEqual(['ordering', 'ordering']);
+    expect(await store.findById('ordering')).toMatchObject({status: 'TRANSPORTING'});
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
+  });
+
+  test('ordinary failure counts survive reclaim by a replacement consumer', async () => {
+    let failures = 0;
+    const failingHandler = async () => { failures++; throw new Error('persistent handler outage'); };
+    await redis.xadd(config.stateStream, '*', 'event', JSON.stringify(event()));
+    consumer = new StreamConsumer(redis, config.stateStream, VEHICLE_CONSUMER_GROUP,
+      {...settings(), pendingMinIdleMs: 60_000}, failingHandler);
+    await consumer.start();
+    await waitUntil(async () => failures === 1);
+    await consumer.stop();
+    expect(await pending()).toBe(1);
+    consumer = new StreamConsumer(redis, config.stateStream, VEHICLE_CONSUMER_GROUP,
+      {...settings(), consumerName: 'failure-budget-recovery'}, failingHandler);
+    await consumer.start();
+    await waitUntil(async () => await redis.xlen(config.dlqStream) === 1 && await pending() === 0);
+    expect(failures).toBe(2);
+  });
+
   test('configuration readiness recovers when another consumer reclaims and ACKs the blocked entry', async () => {
     const mutableConfig = {...settings(), pendingMinIdleMs: 60_000};
     await redis.xadd(config.stateStream, '*', 'event', JSON.stringify(event(8)));

@@ -5,6 +5,7 @@ import type {ProcessingOutcome} from '../domain/types';
 import {ConfigurationBlockedError, decodeInput, ExpiredEventError} from './codecs';
 import {deadLetter} from './dlq';
 import {AwaitingPredecessorError} from './errors';
+import {acknowledge, failureBudgetKey, recordOrdinaryFailure} from './retry-budget';
 
 export type StreamHandler = (event: WorkerEvent) => Promise<ProcessingOutcome | void>;
 type Entry = [id: string, fields: string[]];
@@ -61,6 +62,7 @@ export class StreamConsumer {
           this.config.pendingMinIdleMs, this.reclaimCursor, 'COUNT', this.config.readCount) as [string, Entry[], string[]?];
         this.reclaimCursor = claimed[0];
         for (const id of claimed[2] ?? []) this.blocked.delete(id);
+        if (claimed[2]?.length) await this.redis.hdel(failureBudgetKey(this.stream, this.group), ...claimed[2]);
         await this.reconcileBlocked();
         for (const entry of claimed[1]) { if (!this.running) break; await this.process(entry); }
         if (!this.running) break;
@@ -99,7 +101,7 @@ export class StreamConsumer {
       if (outcome === 'TRANSIENT_ERROR') throw new Error('Transient handler failure');
       // Validation failures must be thrown as ContractError; handlers cannot silently request an ACKed DLQ.
       if (outcome === 'DLQ') throw new ContractError('Handler rejected event schema');
-      await this.redis.xack(this.stream, this.group, id);
+      await acknowledge(this.redis, this.stream, this.group, id);
       this.blocked.delete(id);
     } catch (error) {
       this.lastError = error;
@@ -111,8 +113,8 @@ export class StreamConsumer {
           error instanceof ExpiredEventError ? 'EXPIRED_EVENT' : 'INVALID_EVENT', error);
         return;
       }
-      const pending = await this.redis.xpending(this.stream, this.group, id, id, 1) as [string, string, number, number][];
-      if ((pending[0]?.[3] ?? 0) >= this.config.maxDeliveries) {
+      const failures = await recordOrdinaryFailure(this.redis, this.stream, this.group, id);
+      if (failures >= this.config.maxDeliveries) {
         await deadLetter(this.redis, this.config, this.stream, this.group, id, fields, 'MAX_DELIVERIES', error);
       }
     }
