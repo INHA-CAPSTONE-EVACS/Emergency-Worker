@@ -4,6 +4,7 @@ import {ContractError, type WorkerEvent} from '../domain/contracts';
 import type {ProcessingOutcome} from '../domain/types';
 import {ConfigurationBlockedError, decodeInput, ExpiredEventError} from './codecs';
 import {deadLetter} from './dlq';
+import {AwaitingPredecessorError} from './errors';
 
 export type StreamHandler = (event: WorkerEvent) => Promise<ProcessingOutcome | void>;
 type Entry = [id: string, fields: string[]];
@@ -60,6 +61,7 @@ export class StreamConsumer {
           this.config.pendingMinIdleMs, this.reclaimCursor, 'COUNT', this.config.readCount) as [string, Entry[], string[]?];
         this.reclaimCursor = claimed[0];
         for (const id of claimed[2] ?? []) this.blocked.delete(id);
+        await this.reconcileBlocked();
         for (const entry of claimed[1]) { if (!this.running) break; await this.process(entry); }
         if (!this.running) break;
         const records = await this.blocking!.xreadgroup('GROUP', this.group, this.config.consumerName,
@@ -73,6 +75,19 @@ export class StreamConsumer {
         this.lastError = error; this.connected = false;
         await new Promise(resolve => setTimeout(resolve, Math.min(this.config.blockMs, 1000)));
       }
+    }
+  }
+
+  private async reconcileBlocked(): Promise<void> {
+    if (!this.blocked.size) return;
+    const ids = [...this.blocked];
+    const pipeline = this.redis.pipeline();
+    for (const id of ids) pipeline.xpending(this.stream, this.group, id, id, 1);
+    const results = await pipeline.exec();
+    if (!results) throw new Error('Blocked-entry reconciliation aborted');
+    for (const [index, [error, entries]] of results.entries()) {
+      if (error) throw error;
+      if (!(entries as unknown[]).length) this.blocked.delete(ids[index]!);
     }
   }
 
@@ -90,6 +105,7 @@ export class StreamConsumer {
       this.lastError = error;
       if (error instanceof ConfigurationBlockedError) { this.blocked.add(id); return; }
       this.blocked.delete(id);
+      if (error instanceof AwaitingPredecessorError) return;
       if (error instanceof ContractError || error instanceof ExpiredEventError) {
         await deadLetter(this.redis, this.config, this.stream, this.group, id, fields,
           error instanceof ExpiredEventError ? 'EXPIRED_EVENT' : 'INVALID_EVENT', error);

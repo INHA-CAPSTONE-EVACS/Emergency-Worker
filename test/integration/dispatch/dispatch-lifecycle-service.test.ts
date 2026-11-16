@@ -110,6 +110,21 @@ describe('dispatch lifecycle', () => {
     expect(routes).toEqual(['dispatch-1', 'dispatch-1']);
   });
 
+  test('a valid nonterminal status without activation remains retryable until the dispatch exists', async () => {
+    const arrived = status('DISPATCHED', 'ARRIVED');
+    await expect(subscriber.handle(arrived)).rejects.toMatchObject({name: 'AwaitingPredecessorError'});
+    await subscriber.handle(dispatched);
+    await subscriber.handle(arrived);
+    expect(await service.findActiveByVehicleId('ambulance-1')).toMatchObject({status: 'ARRIVED_ON_SCENE'});
+  });
+
+  test('a status stays retryable when more than one predecessor transition is outstanding', async () => {
+    await store.save({...state, status: 'REGISTERED'});
+    await expect(subscriber.handle(status('ARRIVED', 'TRANSPORTING', state.destination)))
+      .rejects.toMatchObject({name: 'AwaitingPredecessorError'});
+    expect(await store.findById('dispatch-1')).toMatchObject({status: 'REGISTERED'});
+  });
+
   test('ignores illegal backwards status changes without losing active state', async () => {
     await subscriber.handle(dispatched);
     await subscriber.handle(status('DISPATCHED', 'TRANSPORTING'));

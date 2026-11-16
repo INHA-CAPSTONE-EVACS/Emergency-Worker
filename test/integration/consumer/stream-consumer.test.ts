@@ -1,7 +1,10 @@
 import {latLngToCell} from 'h3-js';
 import {StreamConsumer} from '../../../src/consumer/stream-consumer';
+import {DispatchLifecycleService} from '../../../src/dispatch/dispatch-lifecycle-service';
+import {EmergencyEventSubscriber} from '../../../src/dispatch/emergency-event-subscriber';
+import {DispatchStateStore} from '../../../src/store/dispatch-state-store';
 import {VehicleStateSubscriber} from '../../../src/dispatch/vehicle-state-subscriber';
-import {EMERGENCY_CONSUMER_GROUP, VEHICLE_CONSUMER_GROUP} from '../../../src/domain/contracts';
+import {EMERGENCY_CONSUMER_GROUP, VEHICLE_CONSUMER_GROUP, type EmergencyEvent} from '../../../src/domain/contracts';
 import {redisFixture, config} from '../store/fixtures';
 
 const waitUntil = async (predicate: () => Promise<boolean>) => {
@@ -18,8 +21,10 @@ const event = (resolution = 9) => ({eventId: 'state-1', eventType: 'VEHICLE_STAT
 
 describe('reliable stream consumption', () => {
   const {redis, close} = redisFixture();
+  const store = new DispatchStateStore(redis, config);
   let consumer: StreamConsumer | undefined;
-  beforeEach(async () => { await redis.del(config.stateStream, config.emergencyStream, config.dlqStream); });
+  beforeEach(async () => { await redis.del(config.stateStream, config.emergencyStream, config.dlqStream,
+    'dispatch:active', 'dispatch:vehicle:ambulance-1', 'dispatch:ordering:state', 'dispatch:ordering:completed'); });
   afterEach(async () => { await consumer?.stop(); consumer = undefined; });
   afterAll(close);
   const settings = () => ({...config, blockMs: 20, pendingMinIdleMs: 20, maxDeliveries: 2, inactiveTtlMs: 60_000});
@@ -109,6 +114,112 @@ describe('reliable stream consumption', () => {
     await waitUntil(async () => applied === 1);
     await waitUntil(async () => consumer!.ready && !consumer!.configurationBlocked);
     expect(await pending()).toBe(0);
+  });
+
+
+  test.each(['COMPLETED', 'CANCELED'] as const)('%s received during a pending activation prevents late activation after reclaim', async terminal => {
+    const routes: string[] = [];
+    const subscriber = new EmergencyEventSubscriber(new DispatchLifecycleService(redis, store, {
+      requestImmediate: async id => { routes.push(id); },
+    }));
+    const activation: EmergencyEvent = {eventId: 'activate', eventType: 'EMERGENCY_DISPATCHED', schemaVersion: 1,
+      occurredAt: new Date().toISOString(), producer: 'dispatch-service', payload: {emergencyId: 'emergency-1',
+        dispatchId: 'ordering', vehicleId: 'ambulance-1', origin: {latitude: 37, longitude: 126},
+        destination: {latitude: 38, longitude: 127}}};
+    const completed: EmergencyEvent = {...activation, eventId: 'complete', eventType: 'EMERGENCY_STATUS_CHANGED',
+      payload: {emergencyId: 'emergency-1', dispatchId: 'ordering', previousStatus: 'DISPATCHED', currentStatus: terminal}};
+    let failed = false;
+    let attempts = 0;
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP, settings(), async input => {
+      attempts++;
+      if (input.eventType === 'EMERGENCY_DISPATCHED' && !failed) { failed = true; throw new Error('activation temporarily unavailable'); }
+      await subscriber.handle(input);
+    });
+    await redis.xadd(config.emergencyStream, '*', 'event', JSON.stringify(activation));
+    await redis.xadd(config.emergencyStream, '*', 'event', JSON.stringify(completed));
+    await consumer.start();
+    await waitUntil(async () => attempts >= 3 && await pending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP) === 0);
+    expect(await store.findById('ordering')).toBeNull();
+    expect(routes).toEqual([]);
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
+  });
+
+  test('a later valid status remains pending until its predecessor status succeeds', async () => {
+    const subscriber = new EmergencyEventSubscriber(new DispatchLifecycleService(redis, store, {requestImmediate: async () => {}}));
+    const activation: EmergencyEvent = {eventId: 'activate', eventType: 'EMERGENCY_DISPATCHED', schemaVersion: 1,
+      occurredAt: new Date().toISOString(), producer: 'dispatch-service', payload: {emergencyId: 'emergency-1',
+        dispatchId: 'ordering', vehicleId: 'ambulance-1', origin: {latitude: 37, longitude: 126},
+        destination: {latitude: 38, longitude: 127}}};
+    await subscriber.handle(activation);
+    const arrived: EmergencyEvent = {...activation, eventId: 'arrive', eventType: 'EMERGENCY_STATUS_CHANGED',
+      payload: {emergencyId: 'emergency-1', dispatchId: 'ordering', previousStatus: 'DISPATCHED', currentStatus: 'ARRIVED'}};
+    const transporting: EmergencyEvent = {...arrived, eventId: 'transport', payload: {emergencyId: 'emergency-1',
+      dispatchId: 'ordering', previousStatus: 'ARRIVED', currentStatus: 'TRANSPORTING', destination: {latitude: 39, longitude: 128}}};
+    let allowArrived = false;
+    let seenTransport = false;
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP,
+      {...settings(), pendingMinIdleMs: 60_000}, async input => {
+        if (input.eventId === 'arrive' && !allowArrived) throw new Error('arrival temporarily unavailable');
+        if (input.eventId === 'transport') seenTransport = true;
+        await subscriber.handle(input);
+      });
+    await redis.xadd(config.emergencyStream, '*', 'event', JSON.stringify(arrived));
+    await redis.xadd(config.emergencyStream, '*', 'event', JSON.stringify(transporting));
+    await consumer.start();
+    await waitUntil(async () => seenTransport);
+    expect(await pending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP)).toBe(2);
+    await consumer.stop();
+    allowArrived = true;
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP,
+      {...settings(), consumerName: 'ordered-recovery'}, subscriber.handle);
+    await consumer.start();
+    await waitUntil(async () => await pending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP) === 0);
+    expect(await store.findById('ordering')).toMatchObject({status: 'TRANSPORTING', destination: {latitude: 39, longitude: 128}});
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
+  });
+
+  test('valid status awaiting a predecessor bypasses the ordinary delivery cap', async () => {
+    const subscriber = new EmergencyEventSubscriber(new DispatchLifecycleService(redis, store, {requestImmediate: async () => {}}));
+    const activation: EmergencyEvent = {eventId: 'activate', eventType: 'EMERGENCY_DISPATCHED', schemaVersion: 1,
+      occurredAt: new Date().toISOString(), producer: 'dispatch-service', payload: {emergencyId: 'emergency-1',
+        dispatchId: 'ordering', vehicleId: 'ambulance-1', origin: {latitude: 37, longitude: 126},
+        destination: {latitude: 38, longitude: 127}}};
+    await subscriber.handle(activation);
+    const transporting: EmergencyEvent = {...activation, eventId: 'transport', eventType: 'EMERGENCY_STATUS_CHANGED',
+      payload: {emergencyId: 'emergency-1', dispatchId: 'ordering', previousStatus: 'ARRIVED', currentStatus: 'TRANSPORTING',
+        destination: {latitude: 39, longitude: 128}}};
+    await redis.xadd(config.emergencyStream, '*', 'event', JSON.stringify(transporting));
+    consumer = new StreamConsumer(redis, config.emergencyStream, EMERGENCY_CONSUMER_GROUP,
+      {...settings(), maxDeliveries: 1}, subscriber.handle);
+    await consumer.start();
+    await waitUntil(async () => {
+      const deliveries = await redis.xpending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP, '-', '+', 1) as [string, string, number, number][];
+      return (deliveries[0]?.[3] ?? 0) > 2;
+    });
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
+    await subscriber.handle({...transporting, eventId: 'arrive', payload: {emergencyId: 'emergency-1', dispatchId: 'ordering',
+      previousStatus: 'DISPATCHED', currentStatus: 'ARRIVED'}});
+    await waitUntil(async () => await pending(config.emergencyStream, EMERGENCY_CONSUMER_GROUP) === 0);
+    expect(await store.findById('ordering')).toMatchObject({status: 'TRANSPORTING'});
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
+  });
+
+  test('configuration readiness recovers when another consumer reclaims and ACKs the blocked entry', async () => {
+    const mutableConfig = {...settings(), pendingMinIdleMs: 60_000};
+    await redis.xadd(config.stateStream, '*', 'event', JSON.stringify(event(8)));
+    consumer = new StreamConsumer(redis, config.stateStream, VEHICLE_CONSUMER_GROUP, mutableConfig, async () => {});
+    await consumer.start();
+    await waitUntil(async () => consumer!.configurationBlocked);
+    mutableConfig.h3Resolution = 8;
+    const replacement = new StreamConsumer(redis, config.stateStream, VEHICLE_CONSUMER_GROUP,
+      {...settings(), h3Resolution: 8, consumerName: 'other-worker'}, async () => {});
+    try {
+      await replacement.start();
+      await waitUntil(async () => await pending() === 0);
+      expect(replacement.ready).toBe(true);
+      await waitUntil(async () => consumer!.ready && !consumer!.configurationBlocked);
+    } finally { await replacement.stop(); }
+    expect(await redis.xlen(config.dlqStream)).toBe(0);
   });
 
   test('a state update without an active emergency dispatch has no Fast-Path effect', async () => {

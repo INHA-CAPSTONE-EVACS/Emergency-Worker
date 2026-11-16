@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import {AwaitingPredecessorError} from '../consumer/errors';
 import {ACTIVE_DISPATCHES_KEY, dispatchStateKey, dispatchVehicleKey, type DispatchStatus, type EmergencyEvent,
   type InputDispatchStatus} from '../domain/contracts';
 import type {DispatchState} from '../domain/types';
@@ -37,6 +38,9 @@ const transitions: Record<DispatchStatus, readonly DispatchStatus[]> = {
   COMPLETED: [], CANCELED: [],
 };
 
+const canReach = (from: DispatchStatus, required: DispatchStatus): boolean =>
+  transitions[from].some(next => next === required || canReach(next, required));
+
 export class DispatchLifecycleService {
   constructor(private readonly redis: Redis, private readonly store: DispatchStateStore,
     private readonly routes: ImmediateRouteScheduler) {}
@@ -62,18 +66,29 @@ export class DispatchLifecycleService {
     const p = event.payload;
     const current = await this.store.findById(p.dispatchId);
     const next = normalize(p.currentStatus);
-    if (!current) return;
-    if (current.emergencyId !== p.emergencyId) return;
+    if (current && current.emergencyId !== p.emergencyId) return;
     const previous = normalize(p.previousStatus);
+    if (!transitions[previous].includes(next)) return;
+    // A terminal event is authoritative even when activation or an intermediate status is still pending.
+    // Persisting the completion intent before ACK prevents its predecessor from activating on reclaim.
+    if (next === 'COMPLETED' || next === 'CANCELED') {
+      await this.completeDispatch(p.dispatchId, event.occurredAt); return;
+    }
+    if (!current) {
+      if (await this.redis.exists(terminalKey(p.dispatchId))) return;
+      throw new AwaitingPredecessorError(`Dispatch ${p.dispatchId} is awaiting activation`);
+    }
     if (current.status === next) {
       // Replays must retry routing if the original scheduler call failed after the state commit.
       if (next === 'TRANSPORTING' && p.destination && current.destination.latitude === p.destination.latitude
         && current.destination.longitude === p.destination.longitude) await this.routes.requestImmediate(p.dispatchId);
       return;
     }
-    if (current.status !== previous || !transitions[current.status].includes(next)) return;
-    if (next === 'COMPLETED' || next === 'CANCELED') {
-      await this.completeDispatch(p.dispatchId, event.occurredAt); return;
+    if (current.status !== previous) {
+      if (canReach(current.status, previous)) {
+        throw new AwaitingPredecessorError(`Dispatch ${p.dispatchId} is awaiting ${previous}`);
+      }
+      return; // A replay of an already surpassed transition.
     }
     const changed = await this.redis.eval(transitionScript, 2, dispatchStateKey(p.dispatchId), terminalKey(p.dispatchId),
       current.status, next, JSON.stringify(p.destination ?? current.destination), event.occurredAt);
