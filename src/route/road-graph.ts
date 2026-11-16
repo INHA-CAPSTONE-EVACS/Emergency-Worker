@@ -70,13 +70,20 @@ export class RoadGraph {
   getOutgoingEdges(nodeId: string): readonly RoadEdge[] { return this.outgoing.get(nodeId) ?? empty; }
   getCellsForEdge(id: string): readonly string[] { return this.edgeIndex.get(id)?.cells ?? noCells; }
 
-  findNearestEdge(position: Coordinates, maxDistanceM = 30, edgeIds?: readonly string[]): RoadEdge | null {
-    let nearest: RoadEdge | null = null, nearestDistance = maxDistanceM;
+  findNearestEdge(position: Coordinates & {headingDegrees?: number}, maxDistanceM = 30, edgeIds?: readonly string[]): RoadEdge | null {
+    let nearest: RoadEdge | null = null, nearestDistance = maxDistanceM, nearestHeadingDifference = Infinity;
     const candidates = edgeIds ? edgeIds.flatMap(id => this.getEdge(id) ?? []) : this.edges;
     for (const edge of candidates) {
-      const distance = projectOnPolyline(position, edge.geometry).distanceM;
-      if (distance <= nearestDistance && (distance < nearestDistance || !nearest || edge.id < nearest.id)) {
-        nearest = edge; nearestDistance = distance;
+      const projection = projectOnPolyline(position, edge.geometry);
+      const distance = projection.distanceM;
+      if (distance > maxDistanceM) continue;
+      const difference = typeof position.headingDegrees === 'number' && Number.isFinite(position.headingDegrees)
+        ? headingDifference(position.headingDegrees, projection.headingDegrees) : 0;
+      // Keep geometric proximity primary, then distinguish coincident directed roads by local travel direction.
+      const tiedDistance = Math.abs(distance - nearestDistance) <= 1e-7;
+      if (!nearest || distance < nearestDistance - 1e-7 || (tiedDistance && (difference < nearestHeadingDifference
+        || (difference === nearestHeadingDifference && edge.id < nearest.id)))) {
+        nearest = edge; nearestDistance = distance; nearestHeadingDifference = difference;
       }
     }
     return nearest;

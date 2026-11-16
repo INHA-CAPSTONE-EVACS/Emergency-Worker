@@ -44,6 +44,17 @@ describe('YieldTargetEvaluator', () => {
     expect(result.map(candidate => candidate.vehicle.vehicleId)).toEqual(['incoming']);
     expect(result[0]).toMatchObject({sameRoute: false, intersection: true});
   });
+  test('retains a northbound same-route target when a coincident reverse edge sorts first', () => {
+    const document = graphDocument();
+    const current = document.edges[0]!;
+    document.edges.push({...current, id: 'a-reverse', from: current.to, to: current.from});
+    const graph = RoadGraph.load(document);
+    const result = new YieldTargetEvaluator(graph).filterCandidates(vehicle(), [target()],
+      calculator.buildRouteCone(vehicle(), turnRoute, graph), turnRoute);
+    expect(result.map(candidate => candidate.vehicle.vehicleId)).toEqual(['target']);
+    expect(result[0]).toMatchObject({sameRoute: true, intersection: false});
+    expect(result[0]!.estimatedArrivalSeconds).toBeCloseTo(13.3434, 3);
+  });
   test('rejects the exact 135 degree boundary even with relevant road-edge data', () => {
     const graph = RoadGraph.load(graphDocument());
     const cone = calculator.buildRouteCone(vehicle(), turnRoute, graph);

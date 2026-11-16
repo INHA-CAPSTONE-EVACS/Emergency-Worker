@@ -32,6 +32,25 @@ describe('RoadGraph', () => {
     expect(graph.findNearestEdge({latitude: 1, longitude: 1})).toBeNull();
   });
 
+  test.each([[0, 'current'], [180, 'a-reverse']] as const)('matches coincident directed roads using travel heading %s', (headingDegrees, expected) => {
+    const document = graphDocument();
+    const current = document.edges[0]!;
+    document.edges.push({...current, id: 'a-reverse', from: current.to, to: current.from});
+    const graph = RoadGraph.load(document);
+    expect(graph.findNearestEdge(vehicle({latitude: 0.001, headingDegrees}))?.id).toBe(expected);
+  });
+
+  test('uses the local polyline direction on coincident curved roads', () => {
+    const document = graphDocument();
+    const current = document.edges[0]!;
+    const geometry = [{latitude: 0, longitude: 0}, {latitude: 0.001, longitude: 0},
+      {latitude: 0.001, longitude: -0.001}, {latitude: 0.002, longitude: 0}];
+    const graph = RoadGraph.load({...document, edges: [
+      {...current, geometry}, {...current, id: 'a-reverse', from: current.to, to: current.from, geometry: [...geometry].reverse()},
+    ]});
+    expect(graph.findNearestEdge(vehicle({latitude: 0.001, longitude: -0.0005, headingDegrees: 270}))?.id).toBe('current');
+  });
+
   test('includes incoming roads only at reachable planned turns', () => {
     const graph = RoadGraph.load(graphDocument());
     const context = graph.getRouteContext(vehicle(), ['current', 'turn', 'far'], 400);

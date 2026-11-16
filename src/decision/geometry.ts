@@ -30,8 +30,10 @@ export function destination(origin: Coordinates, heading: number, metres: number
 }
 
 /** Local tangent projection is used only for matching a point to nearby road geometry. */
-export function projectOnPolyline(point: Coordinates, geometry: readonly Coordinates[]): {distanceM: number; remainingFraction: number} {
-  let nearest = Infinity, remaining = 0;
+export function projectOnPolyline(point: Coordinates, geometry: readonly Coordinates[]): {
+  distanceM: number; remainingFraction: number; headingDegrees: number;
+} {
+  let nearest = Infinity, remaining = 0, heading = 0;
   const lengths = geometry.slice(1).map((end, i) => distanceM(geometry[i]!, end));
   const total = lengths.reduce((sum, length) => sum + length, 0);
   let traversed = 0;
@@ -48,8 +50,9 @@ export function projectOnPolyline(point: Coordinates, geometry: readonly Coordin
     if (distance < nearest) {
       nearest = distance;
       remaining = total - traversed - t * lengths[i - 1]!;
+      heading = bearingDegrees(start, end);
     }
     traversed += lengths[i - 1]!;
   }
-  return {distanceM: nearest, remainingFraction: total === 0 ? 0 : remaining / total};
+  return {distanceM: nearest, remainingFraction: total === 0 ? 0 : remaining / total, headingDegrees: heading};
 }
