@@ -24,6 +24,11 @@ describe('canonical event codecs', () => {
       h3CellId: '8830e0a845fffff', previousH3CellId: null, stateVersion: 2,
       measuredAt: '2026-11-16T12:00:00.000Z'}))).not.toThrow();
   });
+  test.each(['h3CellId', 'previousH3CellId'])('rejects malformed H3 in %s directly', field => {
+    expect(() => parseEventEnvelope(envelope('VEHICLE_STATE_UPDATED', {vehicleId: 'v', vehicleType: 'NORMAL',
+      h3CellId: '8930e0a845bffff', previousH3CellId: null, stateVersion: 2,
+      measuredAt: '2026-11-16T12:00:00.000Z', [field]: 'not-an-h3-cell'}))).toThrow();
+  });
   test.each(Object.keys(requested))('rejects requested alert missing %s', field => {
     const payload: Record<string, unknown> = {...requested}; delete payload[field];
     expect(() => parseEventEnvelope(envelope('YIELD_ALERT_REQUESTED', payload))).toThrow();
