@@ -11,6 +11,11 @@ local fields = cjson.decode(ARGV[1])
 fields.decisionVersion = tostring(math.max(current, tonumber(fields.decisionVersion)))
 for field, value in pairs(fields) do redis.call('HSET', KEYS[1], field, value) end
 return 1`;
+const saveConeScript = `
+local status = redis.call('HGET', KEYS[1], 'status')
+if not status or status == 'COMPLETED' or status == 'CANCELED' then return 0 end
+redis.call('SET', KEYS[2], ARGV[1])
+return 1`;
 
 export class DispatchStateStore {
   constructor(private readonly redis: Redis, private readonly config: Pick<WorkerConfig, 'alertOutboxStream'> = loadConfig()) {}
@@ -28,7 +33,8 @@ export class DispatchStateStore {
   }
 
   async saveCone(dispatchId: string, cone: Cone): Promise<void> {
-    await this.redis.set(dispatchConeKey(dispatchId), JSON.stringify(cone));
+    // Completion may have removed the dispatch after the evaluator read it.
+    await this.redis.eval(saveConeScript, 2, dispatchStateKey(dispatchId), dispatchConeKey(dispatchId), JSON.stringify(cone));
   }
 
   async findCone(dispatchId: string): Promise<Cone | null> {

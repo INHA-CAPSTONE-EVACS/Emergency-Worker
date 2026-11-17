@@ -1,6 +1,9 @@
 import type Redis from 'ioredis';
 import type {WorkerConfig} from '../config/config';
 import {outboxDeliveredKey, parseStreamEvent} from '../domain/contracts';
+import type {CanonicalRequestEvent} from '../domain/contracts';
+import type {EventPublisher} from '../domain/types';
+import {RedisStreamEventPublisher} from './redis-stream-event-publisher';
 
 const cursorSuffix = ':delivery-cursor';
 const receiptScript = `
@@ -16,8 +19,12 @@ return 1`;
 
 /** At-least-once delivery. The durable record survives an XADD/receipt crash gap. */
 export class RedisAlertOutboxDispatcher {
+  private readonly publisher: EventPublisher;
   constructor(private readonly redis: Redis, private readonly config: Pick<WorkerConfig,
-    'alertOutboxStream' | 'alertStream' | 'readCount' | 'alertStreamMaxlen'>) {}
+    'alertOutboxStream' | 'alertStream' | 'readCount' | 'alertStreamMaxlen' | 'gatewayAlertStream'>,
+    publisher?: EventPublisher) {
+    this.publisher = publisher ?? new RedisStreamEventPublisher(redis, config);
+  }
 
   async dispatchPending(): Promise<void> {
     const cursorKey = `${this.config.alertOutboxStream}${cursorSuffix}`;
@@ -28,13 +35,11 @@ export class RedisAlertOutboxDispatcher {
       for (const [id, fields] of records) {
         const eventKey = fields[fields.indexOf('eventKey') + 1];
         if (fields.indexOf('eventKey') < 0 || !eventKey) throw new Error('Missing outbox event key');
-        parseStreamEvent(fields);
+        const event = parseStreamEvent(fields) as CanonicalRequestEvent;
         const deliveredKey = outboxDeliveredKey(eventKey);
         let receipt = await this.redis.get(deliveredKey);
         if (!receipt) {
-          const event = fields[fields.indexOf('event') + 1]!;
-          receipt = await this.redis.xadd(this.config.alertStream, 'MAXLEN', '~', this.config.alertStreamMaxlen,
-            '*', 'eventKey', eventKey, 'event', event);
+          receipt = (await this.publisher.publish(this.config.alertStream, event)).messageId;
           if (!receipt) throw new Error('Destination XADD returned no receipt');
         }
         // Both receipt and checkpoint are recorded only after successful destination delivery.
