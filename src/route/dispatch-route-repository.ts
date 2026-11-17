@@ -6,7 +6,7 @@ import type {DispatchState, OutboxRecord, PublishReceipt, RouteResult} from '../
 
 export type FoundRoute = Extract<RouteResult, {outcome: 'ROUTE_FOUND'}>;
 export interface DispatchRoute {
-  routeId: string; dispatchId: string; routeVersion: number; routeCoordinates: Coordinates[];
+  routeId: string; dispatchId: string; routeVersion: number; routeCoordinates: Coordinates[]; destination: Coordinates;
   roadSegments: string[]; estimatedDuration: number; changeReason: string | null; createdAt: string;
 }
 export interface RouteChangeClear {alertId: string; targetVehicleId: string}
@@ -16,14 +16,19 @@ export interface SaveRouteInput {
 }
 export interface RouteOutboxRecord extends OutboxRecord {outboxId: string}
 const fromRow = (row: QueryResultRow): DispatchRoute => ({routeId: row.route_id, dispatchId: row.dispatch_id,
-  routeVersion: row.route_version, routeCoordinates: row.route_coordinates, roadSegments: row.road_segments,
+  routeVersion: row.route_version, routeCoordinates: row.route_coordinates, destination: row.destination, roadSegments: row.road_segments,
   estimatedDuration: row.estimated_duration, changeReason: row.change_reason, createdAt: new Date(row.created_at).toISOString()});
 
 export class DispatchRouteRepository {
   constructor(private readonly pool: Pool) {}
 
   async findLatest(dispatchId: string): Promise<DispatchRoute | null> {
-    const result = await this.pool.query('SELECT * FROM dispatch_route WHERE dispatch_id = $1 ORDER BY route_version DESC LIMIT 1', [dispatchId]);
+    // The transactional route event retains the requested destination, including after delivery.
+    // Its coordinates may differ from the planner's snapped final waypoint.
+    const result = await this.pool.query(`SELECT route.*, outbox.event->'payload'->'destination' AS destination
+      FROM dispatch_route AS route JOIN emergency_route_outbox AS outbox ON outbox.route_id = route.route_id
+      WHERE route.dispatch_id = $1 AND outbox.event->>'eventType' = $2
+      ORDER BY route.route_version DESC LIMIT 1`, [dispatchId, ROUTE_UPDATE_REQUESTED]);
     return result.rows[0] ? fromRow(result.rows[0]) : null;
   }
 
@@ -66,7 +71,7 @@ export class DispatchRouteRepository {
           [routeId, record.eventKey, JSON.stringify(record.event), input.createdAt]);
       }
       await client.query('COMMIT');
-      return fromRow(result.rows[0]!);
+      return fromRow({...result.rows[0]!, destination: dispatch.destination});
     } catch (error) {
       await client.query('ROLLBACK'); throw error;
     } finally {client.release();}

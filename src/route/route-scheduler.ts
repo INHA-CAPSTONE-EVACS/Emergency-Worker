@@ -121,12 +121,17 @@ export class RouteScheduler {
         if (!(error instanceof DensitySnapshotError)) throw error;
         return {outcome: error.configurationBlocked ? 'CONFIGURATION_BLOCKED' : 'TRANSIENT_ERROR', routesCommitted, density, error};
       }
-      if (route.outcome !== 'ROUTE_FOUND' || !deps.stabilizer.shouldReplace(previous, route.estimatedTravelSeconds, this.now())) continue;
+      if (route.outcome !== 'ROUTE_FOUND') continue;
+      // Travel times to different destinations are not comparable. A new leg must be issued
+      // immediately; stabilization applies only to alternatives for the accepted destination.
+      const destinationChanged = previous !== null && (previous.destination.latitude !== dispatch.destination.latitude
+        || previous.destination.longitude !== dispatch.destination.longitude);
+      if (!destinationChanged && !deps.stabilizer.shouldReplace(previous, route.estimatedTravelSeconds, this.now())) continue;
       const current = await deps.dispatches.findById(id);
       if (!active(current) || !sameDestination(dispatch, current)) continue;
       const clears = previous ? await deps.selectRouteChangeClears(current, previous, route, await deps.dispatches.findDecisions(id)) : [];
       const saved = await deps.repository.saveNewVersionWithOutbox({dispatch: current, route,
-        expectedVersion: previous?.routeVersion ?? 0, changeReason: previous ? 'FASTER_ROUTE' : 'INITIAL_ROUTE',
+        expectedVersion: previous?.routeVersion ?? 0, changeReason: destinationChanged ? 'DESTINATION_CHANGED' : previous ? 'FASTER_ROUTE' : 'INITIAL_ROUTE',
         createdAt: new Date(this.now()).toISOString(), clears});
       if (saved) routesCommitted++;
     }

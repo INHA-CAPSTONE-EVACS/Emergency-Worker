@@ -73,6 +73,47 @@ describe('Slow-Path scheduler', () => {
     expect(records).toHaveLength(3);
     expect(records[2]?.event).toMatchObject({eventType: 'YIELD_ALERT_CLEAR_REQUESTED', payload: {targetVehicleId: 'target', reason: 'ROUTE_CHANGED'}});
   });
+  test.each([1000, 10000])('a new transport destination accepts a slower leg after %sms and clears affected targets', async elapsed => {
+    await repository.saveNewVersionWithOutbox(input());
+    const stream = `next-leg-${elapsed}`;
+    const delivery = new RouteOutboxDispatcher(repository, new RedisStreamEventPublisher(redis, config), stream);
+    await delivery.dispatchPending(); // The prior destination must survive delivery and scheduler restart.
+    now = Date.parse(dispatch.updatedAt) + elapsed;
+    await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'lastMeasuredAt', String(now));
+    // Keep requested destination distinct from the planner's snapped graph endpoint.
+    const hospital = {latitude: 0.0011, longitude: 0};
+    await dispatches.save({...dispatch, status: 'TRANSPORTING', destination: hospital});
+    await redis.set(dispatchDecisionsKey(dispatch.dispatchId), JSON.stringify({target: {...decision('target'), dispatchId: dispatch.dispatchId}}));
+    const hospitalGraph = RoadGraph.load({...graphDocument, edges: graphDocument.edges.map(edge =>
+      edge.id === 'ab' ? {...edge, speedLimitMps: 0.5} : edge)});
+    const hospitalPlanner = new RoutePlanner(hospitalGraph, weights);
+    const scheduler = makeScheduler(hospitalPlanner);
+    scheduler.requestImmediate(dispatch.dispatchId);
+    await scheduler.stop();
+    expect(scheduler.lastResult).toMatchObject({outcome: 'APPLIED', routesCommitted: 1});
+    expect(await repository.findLatest(dispatch.dispatchId)).toMatchObject({routeVersion: 2,
+      estimatedDuration: 200, changeReason: 'DESTINATION_CHANGED'});
+    await delivery.dispatchPending();
+    const events = (await redis.xrange(stream, '-', '+')).map(([, fields]) => parseStreamEvent(fields));
+    expect(events).toHaveLength(3);
+    expect(events[1]).toMatchObject({eventType: 'ROUTE_UPDATE_REQUESTED', payload: {
+      routeVersion: 2, destination: hospital, estimatedTravelSeconds: 200,
+    }});
+    expect(events[2]).toMatchObject({eventType: 'YIELD_ALERT_CLEAR_REQUESTED', payload: {targetVehicleId: 'target', reason: 'ROUTE_CHANGED'}});
+    expect(await makeScheduler(hospitalPlanner).tick()).toMatchObject({routesCommitted: 0});
+    expect((await repository.findLatest(dispatch.dispatchId))?.routeVersion).toBe(2);
+  });
+  test.each([[86, 10000, 0], [85, 4999, 0], [85, 5000, 1]])(
+    'the same destination still stabilizes a %ss candidate after %sms', async (seconds, elapsed, committed) => {
+      await repository.saveNewVersionWithOutbox(input());
+      now = Date.parse(dispatch.updatedAt) + elapsed;
+      await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'lastMeasuredAt', String(now));
+      const scheduler = makeScheduler({findRoute: () => ({...input().route, estimatedTravelSeconds: seconds})});
+      scheduler.requestImmediate(dispatch.dispatchId);
+      await scheduler.stop();
+      expect(scheduler.lastResult.routesCommitted).toBe(committed);
+      expect((await repository.findLatest(dispatch.dispatchId))?.routeVersion).toBe(1 + committed);
+    });
   test('immediate bursts and timer ticks never overlap a search and coalesce to one follow-up', async () => {
     let release!: () => void, entered!: () => void, searches = 0, concurrent = 0, maximum = 0;
     const gate = new Promise<void>(resolve => {release = resolve;});
