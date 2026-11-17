@@ -1,4 +1,5 @@
 import {latLngToCell} from 'h3-js';
+import type Redis from 'ioredis';
 import {StreamConsumer} from '../../../src/consumer/stream-consumer';
 import {DispatchLifecycleService} from '../../../src/dispatch/dispatch-lifecycle-service';
 import {EmergencyEventSubscriber} from '../../../src/dispatch/emergency-event-subscriber';
@@ -30,6 +31,21 @@ describe('reliable stream consumption', () => {
   const settings = () => ({...config, blockMs: 20, pendingMinIdleMs: 20, maxDeliveries: 2, inactiveTtlMs: 60_000});
   const pending = async (stream = config.stateStream, group = VEHICLE_CONSUMER_GROUP) =>
     Number((await redis.xpending(stream, group) as [number, ...unknown[]])[0]);
+
+  test('stop closes a retrying reader when its initial connection fails', async () => {
+    const duplicate = redis.duplicate.bind(redis);
+    let reader!: Redis;
+    const replace = jest.spyOn(redis, 'duplicate').mockImplementation(options => {
+      reader = duplicate({...options, port: 1, retryStrategy: () => 20});
+      return reader;
+    });
+    consumer = new StreamConsumer(redis, config.stateStream, VEHICLE_CONSUMER_GROUP, settings(), async () => {});
+    try {
+      await expect(consumer.start()).rejects.toThrow();
+      await consumer.stop();
+      await waitUntil(async () => reader.status === 'end');
+    } finally {replace.mockRestore(); reader?.disconnect();}
+  });
 
   test('ACKs only after the handler commits and stop drains in-flight work', async () => {
     let release!: () => void;

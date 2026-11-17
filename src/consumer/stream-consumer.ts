@@ -17,12 +17,14 @@ export class StreamConsumer {
   private blocking?: Redis;
   private loop?: Promise<void>;
   private running = false;
+  private processing = false;
   private connected = false;
   private readonly blocked = new Set<string>();
   private reclaimCursor = '0-0';
   lastError: unknown;
   constructor(private readonly redis: Redis, readonly stream: string, readonly group: string,
     private readonly config: ConsumerConfig, private readonly handler: StreamHandler) {}
+  get drained(): boolean { return !this.processing; }
   get configurationBlocked(): boolean { return this.blocked.size > 0; }
   get ready(): boolean { return this.running && this.connected && !this.configurationBlocked; }
 
@@ -30,20 +32,22 @@ export class StreamConsumer {
     if (this.running) return;
     try { await this.redis.xgroup('CREATE', this.stream, this.group, '0', 'MKSTREAM'); }
     catch (error) { if (!(error instanceof Error) || !error.message.includes('BUSYGROUP')) throw error; }
-    this.blocking = this.redis.duplicate({disconnectTimeout: 0});
+    this.blocking = this.redis.duplicate({disconnectTimeout: 0, commandTimeout: Math.max(2000, this.config.blockMs + 1000)});
     // ioredis emits connection errors independently of rejected commands.
     this.blocking.on('error', (error: Error) => { this.lastError = error; this.connected = false; });
+    if (this.blocking.status !== 'ready') await new Promise<void>((resolve, reject) => {
+      this.blocking!.once('ready', resolve); this.blocking!.once('error', reject);
+    });
     this.running = true;
     this.connected = true;
     this.loop = this.run();
   }
 
   async stop(): Promise<void> {
-    if (!this.loop) return;
     this.running = false;
     this.connected = false;
     // Disconnect interrupts XREADGROUP without interrupting the command/handler connection.
-    const disconnected = this.blocking?.status === 'end' ? Promise.resolve() : new Promise<void>(resolve => {
+    const disconnected = !this.blocking || this.blocking.status === 'end' ? Promise.resolve() : new Promise<void>(resolve => {
       this.blocking!.once('end', resolve);
       this.blocking!.disconnect();
     });
@@ -94,6 +98,7 @@ export class StreamConsumer {
   }
 
   private async process([id, fields]: Entry): Promise<void> {
+    this.processing = true;
     try {
       const event = decodeInput(fields, this.config);
       const outcome = await this.handler(event);
@@ -117,6 +122,6 @@ export class StreamConsumer {
       if (failures >= this.config.maxDeliveries) {
         await deadLetter(this.redis, this.config, this.stream, this.group, id, fields, 'MAX_DELIVERIES', error);
       }
-    }
+    } finally { this.processing = false; }
   }
 }
