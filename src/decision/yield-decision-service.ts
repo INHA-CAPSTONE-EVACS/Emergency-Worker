@@ -14,7 +14,7 @@ import type {YieldActionResolver} from './yield-action-resolver';
 import type {YieldTargetEvaluator} from './yield-target-evaluator';
 
 export interface EvaluationOptions {targetVehicleId?: string; route?: RouteResult}
-type ActiveCone = Cone & {route?: RouteResult};
+type ActiveCone = Cone & {route?: RouteResult; sourceEmergencyStateVersion?: number};
 const semanticFields = ['alertId', 'emergencyId', 'dispatchId', 'emergencyVehicleId', 'targetVehicleId',
   'approachDirection', 'estimatedArrivalSeconds', 'recommendedAction', 'reason'] as const;
 const sameDecision = (a: YieldDecision, b: YieldDecision) => semanticFields.every(field => a[field] === b[field]);
@@ -73,7 +73,7 @@ export class YieldDecisionService implements VehicleStateFastPath {
       } else {
         const rebuilt = route ? this.cones.buildRouteCone(emergency, route, this.graph) : this.cones.buildCone(emergency);
         // Persist route context with the cone so notifications and process restarts use the same topology.
-        cone = route ? {...rebuilt, route} : rebuilt;
+        cone = {...rebuilt, ...(route ? {route} : {}), sourceEmergencyStateVersion: emergency.stateVersion};
         if (!await this.dispatches.saveCone(dispatchId, cone, emergency.stateVersion)) continue;
         // Include former targets in the bulk read to distinguish passing from other removals.
         ids = [...new Set([...await this.vehicles.findVehicleIdsInCells(cone.cells, cutoff),
@@ -118,7 +118,7 @@ export class YieldDecisionService implements VehicleStateFastPath {
           schemaVersion: 1, occurredAt: issuedAt, producer: WORKER_EVENT_PRODUCER,
           payload: {alertId: old.alertId, dispatchId, targetVehicleId: old.targetVehicleId, reason}}});
       }
-      const result = await this.decisions.compareSaveAndEnqueue(dispatchId, dispatch.decisionVersion, next, records);
+      const result = await this.decisions.compareSaveAndEnqueue(dispatchId, dispatch.decisionVersion, next, records, cone);
       if (result.accepted) return result;
       // A concurrent evaluator or completion won. Re-read all authoritative input before retrying.
     }

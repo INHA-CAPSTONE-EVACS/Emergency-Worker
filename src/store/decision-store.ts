@@ -1,8 +1,8 @@
 import type Redis from 'ioredis';
 import {loadConfig, type WorkerConfig} from '../config/config';
-import {dispatchDecisionsKey, dispatchStateKey, parseEventEnvelope, YIELD_ALERT_CLEAR_REQUESTED,
+import {dispatchConeKey, dispatchDecisionsKey, dispatchStateKey, parseEventEnvelope, YIELD_ALERT_CLEAR_REQUESTED,
   YIELD_ALERT_REQUESTED} from '../domain/contracts';
-import type {DecisionDiff, OutboxRecord, YieldDecision} from '../domain/types';
+import type {Cone, DecisionDiff, OutboxRecord, YieldDecision} from '../domain/types';
 import {loadLuaScript} from './lua-script';
 
 const script = loadLuaScript('compare-save-and-enqueue.lua');
@@ -15,7 +15,7 @@ export class DecisionStore {
   constructor(private readonly redis: Redis, private readonly config: Pick<WorkerConfig, 'alertOutboxStream'> = loadConfig()) {}
 
   async compareSaveAndEnqueue(dispatchId: string, expectedVersion: number, next: readonly YieldDecision[],
-    events: readonly OutboxRecord[]): Promise<DecisionDiff> {
+    events: readonly OutboxRecord[], expectedCone?: Cone): Promise<DecisionDiff> {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw new Error('Invalid expected decision version');
     const map: Record<string, YieldDecision> = Object.create(null) as Record<string, YieldDecision>;
     for (const decision of next) {
@@ -31,8 +31,9 @@ export class DecisionStore {
       if (event.payload.dispatchId !== dispatchId || record.eventKey !== decisionEventKey(dispatchId, expectedVersion + 1,
         event.eventType, event.payload.targetVehicleId)) throw new Error('Invalid deterministic event key');
     }
-    const value = await this.redis.eval(script, 3, dispatchStateKey(dispatchId), dispatchDecisionsKey(dispatchId),
-      this.config.alertOutboxStream, expectedVersion, JSON.stringify(map), JSON.stringify(events)) as string;
+    const value = await this.redis.eval(script, 4, dispatchStateKey(dispatchId), dispatchDecisionsKey(dispatchId),
+      this.config.alertOutboxStream, dispatchConeKey(dispatchId), expectedVersion, JSON.stringify(map), JSON.stringify(events),
+      expectedCone ? JSON.stringify(expectedCone) : '') as string;
     const result = JSON.parse(value) as DecisionDiff;
     // Redis Lua cjson encodes an empty table as {}; keep the public array contract.
     for (const field of ['added', 'changed', 'removed', 'outboxIds'] as const) {

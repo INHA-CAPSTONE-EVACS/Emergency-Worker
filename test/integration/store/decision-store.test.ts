@@ -2,7 +2,7 @@ import {DispatchStateStore} from '../../../src/store/dispatch-state-store';
 import {DecisionStore} from '../../../src/store/decision-store';
 import {RedisAlertOutboxDispatcher} from '../../../src/publishing/redis-alert-outbox-dispatcher';
 import {parseStreamEvent} from '../../../src/domain/contracts';
-import {redisFixture, config, state, decision, request} from './fixtures';
+import {redisFixture, config, state, cone, decision, request} from './fixtures';
 
 describe('atomic decision outbox', () => {
   const {redis, close} = redisFixture();
@@ -31,6 +31,20 @@ describe('atomic decision outbox', () => {
     const same = {...decision('target-1', 2), issuedAt: '2026-11-16T12:00:01.000Z', expiresAt: '2026-11-16T12:00:21.000Z'};
     expect(await store.compareSaveAndEnqueue(state.dispatchId, 1, [same], [])).toMatchObject({accepted: true, decisionVersion: 1, added: [], changed: [], removed: [], outboxIds: []});
     expect(await dispatches.findDecisions(state.dispatchId)).toEqual([decision()]);
+    expect(await redis.xlen(config.alertOutboxStream)).toBe(1);
+  });
+  test('atomically fences the expected cone snapshot even when decision and source versions are unchanged', async () => {
+    const older = {...cone, sourceEmergencyStateVersion: 1};
+    const newer = {...older, headingDegrees: 90};
+    await dispatches.saveCone(state.dispatchId, newer, 1);
+    expect(await store.compareSaveAndEnqueue(state.dispatchId, 0, [decision()], [request(decision())], older))
+      .toMatchObject({accepted: false, decisionVersion: 0, outboxIds: []});
+    expect(await dispatches.findDecisions(state.dispatchId)).toEqual([]);
+    expect(await redis.xlen(config.alertOutboxStream)).toBe(0);
+    expect(await store.compareSaveAndEnqueue(state.dispatchId, 0, [decision()], [request(decision())], newer))
+      .toMatchObject({accepted: true, decisionVersion: 1});
+    expect(await store.compareSaveAndEnqueue(state.dispatchId, 1, [decision()], [], newer))
+      .toMatchObject({accepted: true, decisionVersion: 1, outboxIds: []});
     expect(await redis.xlen(config.alertOutboxStream)).toBe(1);
   });
   test('returns changed and removed deltas with canonical records', async () => {

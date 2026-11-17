@@ -159,6 +159,34 @@ describe('Fast-Path decision deltas', () => {
         alertedTargets: ['new-cone-target']});
   });
 
+  test('a newer cone fences stale decisions after the older emergency cone has already been saved', async () => {
+    await seed(normal({vehicleId: 'old-cone-target'}));
+    let pauseReached!: () => void, resumeOlder!: () => void;
+    const paused = new Promise<void>(resolve => { pauseReached = resolve; });
+    const resume = new Promise<void>(resolve => { resumeOlder = resolve; });
+    const saveCone = dispatches.saveCone.bind(dispatches);
+    jest.spyOn(dispatches, 'saveCone').mockImplementationOnce(async (...args) => {
+      const accepted = await saveCone(...args);
+      pauseReached();
+      await resume;
+      return accepted;
+    });
+    const older = service.onEmergencyVehicleMoved(emergency.vehicleId);
+    try {
+      await paused;
+      await seed(vehicle({...emergency, latitude: 0.02, stateVersion: 2}));
+      await service.onEmergencyVehicleMoved(emergency.vehicleId);
+      expect((await dispatches.findById(state.dispatchId))?.decisionVersion).toBe(0);
+    } finally {
+      resumeOlder();
+      await older;
+    }
+    expect({coneOrigin: (await dispatches.findCone(state.dispatchId))?.origin,
+      decisionVersion: (await dispatches.findById(state.dispatchId))?.decisionVersion,
+      decisions: await dispatches.findDecisions(state.dispatchId), events: await events()})
+      .toEqual({coneOrigin: {latitude: 0.02, longitude: 0}, decisionVersion: 0, decisions: [], events: []});
+  });
+
   test('completion during emergency evaluation cannot recreate cone or decision state', async () => {
     await seed(normal());
     const saveCone = dispatches.saveCone.bind(dispatches);

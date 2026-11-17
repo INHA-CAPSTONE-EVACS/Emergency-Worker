@@ -1,4 +1,5 @@
--- KEYS: dispatch hash, decision map, durable outbox. ARGV: expected version, next map, records.
+-- KEYS: dispatch hash, decision map, durable outbox, cone.
+-- ARGV: expected version, next map, records, optional expected cone snapshot.
 -- Validate every fallible input/key before the first mutation: Lua errors do not roll back Redis writes.
 local function require_type(key, expected)
   local actual = redis.call('TYPE', key).ok
@@ -12,6 +13,11 @@ local result = {accepted = false, decisionVersion = current, added = {}, changed
 if redis.call('EXISTS', KEYS[1]) == 0 or current ~= tonumber(ARGV[1]) then return cjson.encode(result) end
 local status = redis.call('HGET', KEYS[1], 'status')
 if status == 'COMPLETED' or status == 'CANCELED' then return cjson.encode(result) end
+-- A cone move can be a decision no-op, so decisionVersion alone cannot fence stale evaluations.
+if ARGV[4] ~= '' then
+  require_type(KEYS[4], 'string')
+  if redis.call('GET', KEYS[4]) ~= ARGV[4] then return cjson.encode(result) end
+end
 local previous = cjson.decode(redis.call('GET', KEYS[2]) or '{}')
 local next = cjson.decode(ARGV[2])
 local records = cjson.decode(ARGV[3])
