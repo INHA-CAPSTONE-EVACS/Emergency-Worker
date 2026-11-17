@@ -1,0 +1,16 @@
+{
+  "version": "routing-fixture-v1",
+  "h3Resolution": 9,
+  "nodes": [
+    {"id": "a", "latitude": 0, "longitude": 0},
+    {"id": "b", "latitude": 0.001, "longitude": 0},
+    {"id": "c", "latitude": 0, "longitude": 0.001},
+    {"id": "d", "latitude": 0.001, "longitude": 0.001}
+  ],
+  "edges": [
+    {"id": "ab", "from": "a", "to": "b", "lengthM": 100, "lanes": 1, "speedLimitMps": 5, "cells": ["8930e0a845bffff"]},
+    {"id": "bd", "from": "b", "to": "d", "lengthM": 100, "lanes": 1, "speedLimitMps": 5, "cells": ["8930e0a845bffff"]},
+    {"id": "ac", "from": "a", "to": "c", "lengthM": 200, "lanes": 2, "speedLimitMps": 20, "cells": ["8930e0a845bffff"]},
+    {"id": "cd", "from": "c", "to": "d", "lengthM": 200, "lanes": 2, "speedLimitMps": 20, "cells": ["8930e0a845bffff"]}
+  ]
+}
