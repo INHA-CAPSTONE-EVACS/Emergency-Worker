@@ -17,6 +17,7 @@ export class StreamConsumer {
   private blocking?: Redis;
   private loop?: Promise<void>;
   private running = false;
+  private stopping = false;
   private processing = false;
   private connected = false;
   private readonly blocked = new Set<string>();
@@ -29,21 +30,25 @@ export class StreamConsumer {
   get ready(): boolean { return this.running && this.connected && !this.configurationBlocked; }
 
   async start(): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.stopping) return;
     try { await this.redis.xgroup('CREATE', this.stream, this.group, '0', 'MKSTREAM'); }
     catch (error) { if (!(error instanceof Error) || !error.message.includes('BUSYGROUP')) throw error; }
+    if (this.stopping) return;
     this.blocking = this.redis.duplicate({disconnectTimeout: 0, commandTimeout: Math.max(2000, this.config.blockMs + 1000)});
     // ioredis emits connection errors independently of rejected commands.
     this.blocking.on('error', (error: Error) => { this.lastError = error; this.connected = false; });
     if (this.blocking.status !== 'ready') await new Promise<void>((resolve, reject) => {
       this.blocking!.once('ready', resolve); this.blocking!.once('error', reject);
+      this.blocking!.once('end', () => this.stopping ? resolve() : reject(new Error('Reader closed during startup')));
     });
+    if (this.stopping) return;
     this.running = true;
     this.connected = true;
     this.loop = this.run();
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     this.running = false;
     this.connected = false;
     // Disconnect interrupts XREADGROUP without interrupting the command/handler connection.

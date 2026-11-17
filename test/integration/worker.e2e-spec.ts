@@ -1,4 +1,6 @@
 import {latLngToCell} from 'h3-js';
+import {connect} from 'node:net';
+import Redis from 'ioredis';
 import {loadConfig} from '../../src/config/config';
 import {Worker} from '../../src/worker';
 import {cellVehiclesKey, vehicleStateKey, dispatchStateKey, parseStreamEvent, DENSITY_META_KEY,
@@ -8,6 +10,7 @@ import {RedisAlertOutboxDispatcher} from '../../src/publishing/redis-alert-outbo
 import {YieldDecisionService} from '../../src/decision/yield-decision-service';
 import {DispatchRouteRepository} from '../../src/route/dispatch-route-repository';
 import {RouteScheduler} from '../../src/route/route-scheduler';
+import {HealthServer} from '../../src/infra/health-server';
 import {DispatchStateStore} from '../../src/store/dispatch-state-store';
 import {redisFixture, decision} from './store/fixtures';
 import {postgresFixture, dispatch, input} from './route/fixtures';
@@ -36,6 +39,62 @@ describe('composed worker', () => {
   const quiet = {info() {}, error() {}};
   beforeEach(() => {fixture = redisFixture(); worker = new Worker(config, {redis: fixture.redis, logger: quiet});});
   afterEach(async () => {jest.restoreAllMocks(); await worker.stop(); await fixture.close();});
+
+  test.each(['health binding', 'reader group creation'])('stop cancels startup suspended at %s without resuming resources', async stage => {
+    let release!: () => void, entered = false;
+    const gate = new Promise<void>(resolve => {release = resolve;});
+    const settings = {...config, instanceId: `${config.instanceId}:startup-${stage.replaceAll(' ', '-')}`, shutdownDrainTimeoutMs: 30};
+    if (stage === 'health binding') {
+      const startHealth = HealthServer.prototype.start;
+      jest.spyOn(HealthServer.prototype, 'start').mockImplementation(async function(this: HealthServer) {
+        await startHealth.call(this); entered = true; await gate;
+      });
+    } else {
+      const createGroup = Redis.prototype.xgroup;
+      jest.spyOn(Redis.prototype, 'xgroup').mockImplementation(async function(this: Redis, ...args) {
+        const result = await Reflect.apply(createGroup, this, args);
+        entered = true; await gate; return result;
+      });
+    }
+    worker = new Worker(settings, {redis: fixture.redis, logger: quiet});
+    const starting = worker.start();
+    try {
+      await eventually(async () => entered);
+      await worker.stop();
+    } finally {release();}
+    await expect(starting).resolves.toBeUndefined();
+    expect((await worker.readiness()).ready).toBe(false);
+    await eventually(async () => !String(await fixture.redis.client('LIST')).split('\n')
+      .some(line => line.includes(`name=${settings.instanceId}:`)));
+    await expect(fetch(`${worker.healthUrl}/livez`)).rejects.toThrow();
+    await expect(worker.start()).rejects.toThrow('stopped worker');
+  });
+
+  test('bounds shutdown and closes a socket holding incomplete readiness headers', async () => {
+    worker = new Worker({...config, shutdownDrainTimeoutMs: 30}, {redis: fixture.redis, logger: quiet});
+    await worker.start();
+    const socket = connect(Number(new URL(worker.healthUrl).port), '127.0.0.1');
+    socket.on('error', () => {});
+    await new Promise<void>(resolve => socket.once('connect', resolve));
+    // The preceding complete request confirms the server read this packet before stop.
+    const response = new Promise<void>(resolve => socket.once('data', () => resolve()));
+    socket.write('GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\nGET /readyz HTTP/1.1\r\nHost: localhost\r\n');
+    await response;
+    const closed = new Promise<void>(resolve => socket.once('close', () => resolve()));
+    const stopping = worker.stop();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([stopping, new Promise<string>(resolve => {
+        timer = setTimeout(() => resolve('shutdown exceeded deadline'), 300);
+      })]);
+      if (timer) clearTimeout(timer);
+      expect(result).toEqual({drained: false});
+      expect(await Promise.race([closed.then(() => true), new Promise<boolean>(resolve => {
+        timer = setTimeout(() => resolve(false), 300);
+      })])).toBe(true);
+      await expect(fetch(`${worker.healthUrl}/livez`)).rejects.toThrow();
+    } finally {if (timer) clearTimeout(timer); socket.destroy(); await stopping;}
+  });
 
   test('recovers committed alert intent on restart, projects Gateway payload and emits one canonical clear', async () => {
     const logs: Record<string, unknown>[] = [];
