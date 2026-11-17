@@ -74,7 +74,7 @@ export class YieldDecisionService implements VehicleStateFastPath {
         const rebuilt = route ? this.cones.buildRouteCone(emergency, route, this.graph) : this.cones.buildCone(emergency);
         // Persist route context with the cone so notifications and process restarts use the same topology.
         cone = route ? {...rebuilt, route} : rebuilt;
-        await this.dispatches.saveCone(dispatchId, cone);
+        if (!await this.dispatches.saveCone(dispatchId, cone, emergency.stateVersion)) continue;
         // Include former targets in the bulk read to distinguish passing from other removals.
         ids = [...new Set([...await this.vehicles.findVehicleIdsInCells(cone.cells, cutoff),
           ...previous.map(value => value.targetVehicleId)])];

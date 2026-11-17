@@ -129,12 +129,42 @@ describe('Fast-Path decision deltas', () => {
     expect(await events()).toHaveLength(4);
   });
 
+  test('an older no-op emergency evaluation cannot replace a newer cone or hide a normal update', async () => {
+    let pauseReached!: () => void, resumeOlder!: () => void;
+    const paused = new Promise<void>(resolve => { pauseReached = resolve; });
+    const resume = new Promise<void>(resolve => { resumeOlder = resolve; });
+    const saveCone = dispatches.saveCone.bind(dispatches);
+    jest.spyOn(dispatches, 'saveCone').mockImplementationOnce(async (...args) => {
+      pauseReached();
+      await resume;
+      return saveCone(...args);
+    });
+    const older = service.onEmergencyVehicleMoved(emergency.vehicleId);
+    try {
+      await paused;
+      await seed(vehicle({...emergency, latitude: 0.02, stateVersion: 2}));
+      await service.onEmergencyVehicleMoved(emergency.vehicleId);
+    } finally {
+      resumeOlder();
+      await older;
+    }
+    const persistedCone = await dispatches.findCone(state.dispatchId);
+    const versionAfterNoops = (await dispatches.findById(state.dispatchId))?.decisionVersion;
+    const eventsAfterNoops = (await events()).length;
+    await seed(normal({vehicleId: 'new-cone-target', latitude: 0.0218}));
+    await service.onNormalVehicleMoved('new-cone-target');
+    expect({origin: persistedCone?.origin, versionAfterNoops, eventsAfterNoops,
+      alertedTargets: (await events()).map(event => event.payload.targetVehicleId)})
+      .toEqual({origin: {latitude: 0.02, longitude: 0}, versionAfterNoops: 0, eventsAfterNoops: 0,
+        alertedTargets: ['new-cone-target']});
+  });
+
   test('completion during emergency evaluation cannot recreate cone or decision state', async () => {
     await seed(normal());
     const saveCone = dispatches.saveCone.bind(dispatches);
     jest.spyOn(dispatches, 'saveCone').mockImplementationOnce(async (id, cone) => {
       await lifecycle.completeDispatch(id, state.updatedAt);
-      await saveCone(id, cone);
+      return saveCone(id, cone);
     });
     await service.onEmergencyVehicleMoved(emergency.vehicleId);
     expect(await dispatches.findById(state.dispatchId)).toBeNull();

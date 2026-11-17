@@ -14,6 +14,9 @@ return 1`;
 const saveConeScript = `
 local status = redis.call('HGET', KEYS[1], 'status')
 if not status or status == 'COMPLETED' or status == 'CANCELED' then return 0 end
+local previous = redis.call('GET', KEYS[2])
+local current_version = previous and cjson.decode(previous).sourceEmergencyStateVersion or 0
+if tonumber(ARGV[2]) < current_version then return 0 end
 redis.call('SET', KEYS[2], ARGV[1])
 return 1`;
 
@@ -32,9 +35,11 @@ export class DispatchStateStore {
       decisionVersion: Number(value.decisionVersion), routeVersion: Number(value.routeVersion)} as unknown as DispatchState;
   }
 
-  async saveCone(dispatchId: string, cone: Cone): Promise<void> {
-    // Completion may have removed the dispatch after the evaluator read it.
-    await this.redis.eval(saveConeScript, 2, dispatchStateKey(dispatchId), dispatchConeKey(dispatchId), JSON.stringify(cone));
+  async saveCone(dispatchId: string, cone: Cone, sourceEmergencyStateVersion?: number): Promise<boolean> {
+    // Source state order is independent of decisionVersion: a cone move can be a decision no-op.
+    const value = sourceEmergencyStateVersion === undefined ? cone : {...cone, sourceEmergencyStateVersion};
+    return await this.redis.eval(saveConeScript, 2, dispatchStateKey(dispatchId), dispatchConeKey(dispatchId),
+      JSON.stringify(value), sourceEmergencyStateVersion ?? 0) === 1;
   }
 
   async findCone(dispatchId: string): Promise<Cone | null> {
