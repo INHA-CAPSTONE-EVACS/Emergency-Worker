@@ -1,5 +1,5 @@
--- KEYS: dispatch hash, decision map, durable outbox, cone.
--- ARGV: expected version, next map, records, optional expected cone snapshot.
+-- KEYS: dispatch hash, decision map, durable outbox, cone, then the source state hashes.
+-- ARGV: expected version, next map, records, optional expected cone snapshot, expected source versions, optional route context.
 -- Validate every fallible input/key before the first mutation: Lua errors do not roll back Redis writes.
 local function require_type(key, expected)
   local actual = redis.call('TYPE', key).ok
@@ -17,6 +17,20 @@ if status == 'COMPLETED' or status == 'CANCELED' then return cjson.encode(result
 if ARGV[4] ~= '' then
   require_type(KEYS[4], 'string')
   if redis.call('GET', KEYS[4]) ~= ARGV[4] then return cjson.encode(result) end
+end
+if ARGV[6] ~= '' then
+  local expected = cjson.decode(ARGV[6])
+  local route_version = tonumber(redis.call('HGET', KEYS[1], 'routeVersion') or '0')
+  local destination = cjson.decode(redis.call('HGET', KEYS[1], 'destination'))
+  if route_version ~= expected.routeVersion or destination.latitude ~= expected.destination.latitude
+    or destination.longitude ~= expected.destination.longitude then return cjson.encode(result) end
+end
+-- Location writes the state and advances its monotonic version in the same transaction.
+-- A newer source version can leave the decision map unchanged or recreate an expired hash.
+local source_versions = cjson.decode(ARGV[5])
+for i, expected in ipairs(source_versions) do
+  local version = redis.call('HGET', KEYS[i + 4], 'stateVersion') or cjson.null
+  if version ~= expected then return cjson.encode(result) end
 end
 local previous = cjson.decode(redis.call('GET', KEYS[2]) or '{}')
 local next = cjson.decode(ARGV[2])

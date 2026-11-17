@@ -4,6 +4,12 @@ import type {WorkerConfig} from '../config/config';
 import {cellVehiclesKey, vehicleStateKey, VEHICLE_STATE_FIELDS, VEHICLE_TYPES} from '../domain/contracts';
 import type {VehicleState} from '../domain/types';
 
+interface StateSnapshot {
+  states: VehicleState[];
+  /** Raw versions include inactive records. Null means the source has no versioned state. */
+  versions: ReadonlyMap<string, string | null>;
+}
+
 export class VehicleIndexReader {
   constructor(private readonly redis: Redis, _config?: Pick<WorkerConfig, 'h3Resolution'>) {}
 
@@ -27,16 +33,22 @@ export class VehicleIndexReader {
   }
 
   async getStates(ids: readonly string[]): Promise<VehicleState[]> {
+    return (await this.getStateSnapshot(ids)).states;
+  }
+
+  async getStateSnapshot(ids: readonly string[]): Promise<StateSnapshot> {
     const unique = [...new Set(ids)];
-    if (!unique.length) return [];
+    const states: VehicleState[] = [];
+    const versions = new Map<string, string | null>();
+    if (!unique.length) return {states, versions};
     const pipeline = this.redis.pipeline();
     for (const id of unique) pipeline.hgetall(vehicleStateKey(id));
     const results = await pipeline.exec();
     if (!results) throw new Error('Vehicle state pipeline aborted');
-    const states: VehicleState[] = [];
     for (const [i, [error, value]] of results.entries()) {
       if (error) throw error;
       const hash = value as Record<string, string>;
+      versions.set(unique[i]!, hash.stateVersion ?? null);
       if (!VEHICLE_STATE_FIELDS.every(field => typeof hash[field] === 'string' && hash[field]!.length > 0)
         || hash.vehicleId !== unique[i] || hash.status !== 'ACTIVE'
         || !VEHICLE_TYPES.includes(hash.vehicleType as VehicleState['vehicleType']) || !isValidCell(hash.h3CellId!)) continue;
@@ -55,6 +67,6 @@ export class VehicleIndexReader {
         || !Number.isFinite(Date.parse(state.lastUpdatedAt))) continue;
       states.push(state);
     }
-    return states;
+    return {states, versions};
   }
 }

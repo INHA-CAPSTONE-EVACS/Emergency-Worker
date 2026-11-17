@@ -10,6 +10,7 @@ import type {RouteStabilizer} from './route-stabilizer';
 
 export interface SchedulerPlanner {
   findRoute(origin: Coordinates, destination: Coordinates, density: DensitySnapshot): RouteResult | Promise<RouteResult>;
+  estimateRemainingSeconds(origin: Coordinates, destination: Coordinates, segments: readonly string[], density: DensitySnapshot): number | null;
 }
 export interface RouteTickResult {
   outcome: 'APPLIED' | 'SKIPPED' | 'CONFIGURATION_BLOCKED' | 'TRANSIENT_ERROR';
@@ -17,7 +18,7 @@ export interface RouteTickResult {
 }
 export interface RouteSchedulerDependencies {
   lifecycle: Pick<DispatchLifecycleService, 'findActiveDispatches'>;
-  dispatches: Pick<DispatchStateStore, 'findById' | 'findDecisions'>;
+  dispatches: Pick<DispatchStateStore, 'findById' | 'findDecisions' | 'cacheAcceptedRoute'>;
   vehicles: Pick<VehicleIndexReader, 'getStates'>;
   /** Supply a calculator backed by a dedicated non-blocking Redis connection. */
   weights: Pick<EdgeWeightCalculator, 'loadDensitySnapshot'>;
@@ -102,6 +103,14 @@ export class RouteScheduler {
 
   private async batch(ids: readonly string[]): Promise<RouteTickResult> {
     const deps = this.dependencies;
+    const inputs: {dispatch: DispatchState; previous: DispatchRoute | null}[] = [];
+    for (const id of ids) {
+      const dispatch = await deps.dispatches.findById(id);
+      if (!active(dispatch)) continue;
+      const previous = await deps.repository.findLatest(id);
+      if (previous && previous.routeVersion > dispatch.routeVersion) await this.cacheRoute(previous);
+      inputs.push({dispatch, previous});
+    }
     let density: DensitySnapshot;
     try {density = await deps.weights.loadDensitySnapshot();} catch (error) {
       if (!(error instanceof DensitySnapshotError)) throw error;
@@ -109,33 +118,47 @@ export class RouteScheduler {
         : error.code === 'GENERATION_MISMATCH' ? 'SKIPPED' : 'TRANSIENT_ERROR', routesCommitted: 0, error};
     }
     let routesCommitted = 0;
-    for (const id of ids) {
-      const dispatch = await deps.dispatches.findById(id);
-      if (!active(dispatch)) continue;
+    for (const {dispatch, previous} of inputs) {
+      const id = dispatch.dispatchId;
       const [emergency] = await deps.vehicles.getStates([dispatch.emergencyVehicleId]);
       if (!emergency || emergency.vehicleType !== 'EMERGENCY'
         || emergency.lastMeasuredAt <= this.now() - deps.config.inactiveTtlMs) continue;
-      const previous = await deps.repository.findLatest(id);
+      // A new leg must be issued immediately. Costs are comparable only for the same destination.
+      const destinationChanged = previous !== null && (previous.destination.latitude !== dispatch.destination.latitude
+        || previous.destination.longitude !== dispatch.destination.longitude);
       let route: RouteResult;
-      try {route = await deps.planner.findRoute(emergency, dispatch.destination, density);} catch (error) {
+      let remainingSeconds: number | null = null;
+      try {
+        route = await deps.planner.findRoute(emergency, dispatch.destination, density);
+        if (route.outcome === 'ROUTE_FOUND' && previous && !destinationChanged) {
+          remainingSeconds = deps.planner.estimateRemainingSeconds(emergency, dispatch.destination, previous.roadSegments, density);
+        }
+      } catch (error) {
         if (!(error instanceof DensitySnapshotError)) throw error;
         return {outcome: error.configurationBlocked ? 'CONFIGURATION_BLOCKED' : 'TRANSIENT_ERROR', routesCommitted, density, error};
       }
       if (route.outcome !== 'ROUTE_FOUND') continue;
-      // Travel times to different destinations are not comparable. A new leg must be issued
-      // immediately; stabilization applies only to alternatives for the accepted destination.
-      const destinationChanged = previous !== null && (previous.destination.latitude !== dispatch.destination.latitude
-        || previous.destination.longitude !== dispatch.destination.longitude);
-      if (!destinationChanged && !deps.stabilizer.shouldReplace(previous, route.estimatedTravelSeconds, this.now())) continue;
+      const baseline = previous ? {remainingSeconds, createdAt: previous.createdAt} : null;
+      if (!destinationChanged && !deps.stabilizer.shouldReplace(baseline, route.estimatedTravelSeconds, this.now())) continue;
       const current = await deps.dispatches.findById(id);
       if (!active(current) || !sameDestination(dispatch, current)) continue;
       const clears = previous ? await deps.selectRouteChangeClears(current, previous, route, await deps.dispatches.findDecisions(id)) : [];
       const saved = await deps.repository.saveNewVersionWithOutbox({dispatch: current, route,
         expectedVersion: previous?.routeVersion ?? 0, changeReason: destinationChanged ? 'DESTINATION_CHANGED' : previous ? 'FASTER_ROUTE' : 'INITIAL_ROUTE',
         createdAt: new Date(this.now()).toISOString(), clears});
-      if (saved) routesCommitted++;
+      if (saved) {
+        routesCommitted++;
+        await this.cacheRoute(saved, route);
+      }
     }
     return {outcome: routesCommitted ? 'APPLIED' : 'SKIPPED', routesCommitted, density};
+  }
+
+  private cacheRoute(accepted: DispatchRoute, route?: FoundRoute): Promise<void> {
+    return this.dependencies.dispatches.cacheAcceptedRoute(accepted.dispatchId, accepted.routeVersion,
+      {destination: accepted.destination, route: route ?? {outcome: 'ROUTE_FOUND',
+        roadSegments: accepted.roadSegments, waypoints: accepted.routeCoordinates,
+        estimatedTravelSeconds: accepted.estimatedDuration, congestedSegments: [], distanceM: 0}});
   }
 
   private recordFailure(error: unknown): void {

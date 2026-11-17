@@ -9,6 +9,7 @@ export interface WorkerConfig {
   graphPath: string | undefined; routePersistenceEnabled: boolean; readCount: number; blockMs: number;
   pendingMinIdleMs: number; maxDeliveries: number; dlqMaxlen: number; alertStreamMaxlen: number;
   shutdownDrainTimeoutMs: number; healthPort: number; bprAlpha: number; bprBeta: number;
+  /** Vehicles per kilometre per lane, matching the Location edge-density snapshot. */
   roadCapacity: number; blockedMultiplier: number;
 }
 export interface ConfigIssue {variable: string; message: string}

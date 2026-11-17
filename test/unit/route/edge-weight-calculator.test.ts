@@ -27,9 +27,11 @@ const meta = (extra: Record<string, string> = {}) => ({generation: 'g1', generat
 const calculator = () => new EdgeWeightCalculator(redisHashes({}, {}, {}), config);
 
 describe('EdgeWeightCalculator', () => {
-  test('uses configured BPR and per-lane capacity to return seconds', () => {
-    // t0=10, capacity=10*2, density=20: 10*(1+0.5*1^2)=15.
-    expect(calculator().weight(edge, density({ac: 20}))).toBe(15);
+  test('applies the same BPR ratio on single- and multi-lane edges at the same per-lane density', () => {
+    // Density and capacity are both 10 vehicles/km/lane, so t0 * (1 + 0.5) is 15s.
+    expect(calculator().weight(edge, density({ac: 10}))).toBe(15);
+    expect(calculator().weight({...edge, lanes: 1}, density({ac: 10}))).toBe(15);
+    expect(calculator().isCongested(edge, density({ac: 10}))).toBe(true);
     expect(calculator().weight(edge, density())).toBe(10);
   });
   test('supports zero congestion coefficient without overflow for finite high densities', () => {
@@ -37,15 +39,15 @@ describe('EdgeWeightCalculator', () => {
     expect(weights.weight(edge, density({ac: Number.MAX_VALUE}))).toBe(10);
   });
   test('blocks at the configured travel-time multiplier inclusively', () => {
-    expect(calculator().isBlocked(edge, density({ac: 39}))).toBe(false);
-    expect(calculator().isBlocked(edge, density({ac: 40}))).toBe(true);
+    expect(calculator().isBlocked(edge, density({ac: 19}))).toBe(false);
+    expect(calculator().isBlocked(edge, density({ac: 20}))).toBe(true);
   });
   test('loads matching enabled generations and excludes generation fields from values', async () => {
     const weights = new EdgeWeightCalculator(redisHashes({_generation: 'g1', '8930e0a845bffff': '4'},
       {_generation: 'g1', ac: '20'}, meta()), config);
     const snapshot = await weights.loadDensitySnapshot();
     expect(snapshot).toMatchObject({generation: 'g1', degraded: false, edges: {ac: 20}, cells: {'8930e0a845bffff': 4}});
-    expect(weights.weight(edge, snapshot)).toBe(15);
+    expect(weights.weight(edge, snapshot)).toBe(30);
     expect(Object.isFrozen(snapshot.edges)).toBe(true);
   });
   test.each<Record<string, string>>([{}, {_generation: 'old', ac: '10000'}])('accepts disabled edge density and calculates free flow despite cell counts', async edges => {

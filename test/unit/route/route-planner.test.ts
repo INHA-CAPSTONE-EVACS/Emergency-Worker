@@ -19,15 +19,15 @@ describe('RoutePlanner', () => {
       waypoints: [{latitude: 0, longitude: 0}, {latitude: 0, longitude: 0.001}, {latitude: 0.001, longitude: 0.001}]});
   });
   test('uses density-weighted seconds rather than free-flow cost', () => {
-    expect(new RoutePlanner(graph, weights).findRoute('a', 'd', density({ac: 39, cd: 39}))).toMatchObject({
+    expect(new RoutePlanner(graph, weights).findRoute('a', 'd', density({ac: 19, cd: 19}))).toMatchObject({
       outcome: 'ROUTE_FOUND', roadSegments: ['ab', 'bd'], estimatedTravelSeconds: 40});
   });
   test('excludes an edge at the blocked threshold from route selection', () => {
-    expect(new RoutePlanner(graph, weights).findRoute('a', 'd', density({ac: 40}))).toMatchObject({
+    expect(new RoutePlanner(graph, weights).findRoute('a', 'd', density({ac: 20}))).toMatchObject({
       outcome: 'ROUTE_FOUND', roadSegments: ['ab', 'bd']});
   });
   test('finds congested route segments in order without duplicates', () => {
-    const snapshot = density({ab: 10, cd: 40});
+    const snapshot = density({ab: 10, cd: 20});
     expect(new RoutePlanner(graph, weights).findCongestedSegments(['ab', 'ac', 'cd', 'ab'], snapshot)).toEqual(['ab', 'cd']);
   });
   test('treats disabled edge density as free-flow routing', () => {
@@ -37,7 +37,7 @@ describe('RoutePlanner', () => {
   test('returns typed NO_ROUTE for a disconnected directed destination or all blocked exits', () => {
     const planner = new RoutePlanner(graph, weights);
     expect(planner.findRoute('d', 'a', density())).toEqual({outcome: 'NO_ROUTE', reason: 'DISCONNECTED'});
-    expect(planner.findRoute('a', 'd', density({ab: 20, ac: 40}))).toEqual({outcome: 'NO_ROUTE', reason: 'DISCONNECTED'});
+    expect(planner.findRoute('a', 'd', density({ab: 20, ac: 20}))).toEqual({outcome: 'NO_ROUTE', reason: 'DISCONNECTED'});
   });
   test('returns typed failure for unavailable graph and invalid endpoint', () => {
     expect(new RoutePlanner(null, weights).findRoute('a', 'd', density())).toEqual({outcome: 'NO_ROUTE', reason: 'GRAPH_UNAVAILABLE'});

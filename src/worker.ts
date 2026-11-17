@@ -40,8 +40,10 @@ export class Worker {
   private scheduler?: RouteScheduler;
   private weights?: EdgeWeightCalculator;
   private timer?: ReturnType<typeof setInterval>;
-  private delivery?: Promise<void>;
-  private deliveryError?: unknown;
+  private alertDelivery?: Promise<void>;
+  private alertDeliveryError?: unknown;
+  private routeDelivery?: Promise<void>;
+  private routeDeliveryError?: unknown;
   private started = false;
   private startupWork?: Promise<void>;
   private starting?: Promise<void>;
@@ -97,11 +99,11 @@ export class Worker {
       return receipt;
     }};
     const alertOutbox = new RedisAlertOutboxDispatcher(publisherConnection, this.config, publisher);
-    let repository: DispatchRouteRepository | undefined, routeOutbox: RouteOutboxDispatcher | undefined;
+    let routeOutbox: RouteOutboxDispatcher | undefined;
     if (this.config.routePersistenceEnabled) {
       this.pool = this.dependencies.pool ?? createPostgres(this.config, {query_timeout: 2000, statement_timeout: 2000});
       this.pool.on('error', this.onPoolError);
-      repository = new DispatchRouteRepository(this.pool);
+      const repository = new DispatchRouteRepository(this.pool);
       this.weights = new EdgeWeightCalculator(density, this.config);
       routeOutbox = new RouteOutboxDispatcher(repository, publisher, this.config.alertStream);
       this.scheduler = new RouteScheduler({lifecycle, dispatches, vehicles, weights: this.weights,
@@ -118,16 +120,7 @@ export class Worker {
             .map(({alertId, targetVehicleId}) => ({alertId, targetVehicleId}));
         }});
     }
-    const stateSubscriber = new VehicleStateSubscriber(lifecycle, {
-      onEmergencyState: async (event, dispatch) => {
-        const route = await repository?.findLatest(dispatch.dispatchId);
-        if (route) await decisions.evaluate(dispatch.dispatchId, {route: {outcome: 'ROUTE_FOUND',
-          roadSegments: route.roadSegments, waypoints: route.routeCoordinates,
-          estimatedTravelSeconds: route.estimatedDuration, congestedSegments: [], distanceM: 0}});
-        else await decisions.onEmergencyState(event, dispatch);
-      },
-      onNormalState: event => decisions.onNormalState(event),
-    });
+    const stateSubscriber = new VehicleStateSubscriber(lifecycle, decisions);
     this.consumers = [
       new StreamConsumer(commands, this.config.stateStream, this.config.vehicleConsumerGroup, this.config, stateSubscriber.handle),
       new StreamConsumer(commands, this.config.emergencyStream, this.config.emergencyConsumerGroup, this.config,
@@ -139,11 +132,18 @@ export class Worker {
       if (this.stopRequested) return;
     }
     const deliver = () => {
-      if (this.delivery) return;
-      this.delivery = (async () => {await alertOutbox.dispatchPending(); await routeOutbox?.dispatchPending();})()
-        .then(() => {this.deliveryError = undefined;})
-        .catch(error => {this.deliveryError = error; this.log.error('Outbox delivery failed', error);})
-        .finally(() => {this.delivery = undefined;});
+      if (!this.alertDelivery) {
+        this.alertDelivery = alertOutbox.dispatchPending()
+          .then(() => {this.alertDeliveryError = undefined;})
+          .catch(error => {this.alertDeliveryError = error; this.log.error('Alert outbox delivery failed', error);})
+          .finally(() => {this.alertDelivery = undefined;});
+      }
+      if (routeOutbox && !this.routeDelivery) {
+        this.routeDelivery = routeOutbox.dispatchPending()
+          .then(() => {this.routeDeliveryError = undefined;})
+          .catch(error => {this.routeDeliveryError = error; this.log.error('Route outbox delivery failed', error);})
+          .finally(() => {this.routeDelivery = undefined;});
+      }
     };
     this.started = true;
     this.scheduler?.start();
@@ -172,7 +172,7 @@ export class Worker {
       catch (error) {reasons.push(error instanceof DensitySnapshotError ? error.code : 'density unavailable');}
       if (!this.config.graphPath) degraded.push('GRAPH_UNAVAILABLE');
     }
-    if (this.deliveryError) reasons.push('outbox delivery failed');
+    if (this.alertDeliveryError || this.routeDeliveryError) reasons.push('outbox delivery failed');
     if (this.scheduler?.lastResult.outcome === 'CONFIGURATION_BLOCKED') reasons.push('route configuration blocked');
     return {ready: reasons.length === 0, reasons, degraded};
   }
@@ -186,7 +186,7 @@ export class Worker {
     if (this.timer) clearInterval(this.timer);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const work = Promise.allSettled([this.startupWork, ...this.consumers.map(consumer => consumer.stop()),
-      this.scheduler?.stop(), this.delivery, this.health.stop()])
+      this.scheduler?.stop(), this.alertDelivery, this.routeDelivery, this.health.stop()])
       .then(results => {
         const failures = results.filter(result => result.status === 'rejected');
         for (const failure of failures) this.log.error('Worker drain failed', failure.reason);

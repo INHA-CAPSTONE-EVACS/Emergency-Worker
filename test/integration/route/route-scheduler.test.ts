@@ -32,7 +32,7 @@ describe('Slow-Path scheduler', () => {
     await dispatches.save(dispatch);
     await redis.del(dispatchDecisionsKey(dispatch.dispatchId), DENSITY_CELLS_KEY, DENSITY_EDGES_KEY, DENSITY_META_KEY);
     await redis.hset(DENSITY_CELLS_KEY, '_generation', 'g1');
-    await redis.hset(DENSITY_EDGES_KEY, '_generation', 'g1', 'ac', '20');
+    await redis.hset(DENSITY_EDGES_KEY, '_generation', 'g1', 'ac', '10');
     await redis.hset(DENSITY_META_KEY, 'generation', 'g1', 'generatedAt', dispatch.updatedAt, 'h3Resolution', '9', 'edgeDensity', 'enabled');
     await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), {
       vehicleId: dispatch.emergencyVehicleId, vehicleType: 'EMERGENCY', latitude: '0', longitude: '0',
@@ -108,17 +108,43 @@ describe('Slow-Path scheduler', () => {
       await repository.saveNewVersionWithOutbox(input());
       now = Date.parse(dispatch.updatedAt) + elapsed;
       await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'lastMeasuredAt', String(now));
-      const scheduler = makeScheduler({findRoute: () => ({...input().route, estimatedTravelSeconds: seconds})});
+      const thresholdGraph = RoadGraph.load({...graphDocument, edges: graphDocument.edges.map(edge =>
+        ({...edge, speedLimitMps: 2, lengthM: edge.lanes === 1 ? 100 : seconds}))});
+      await redis.hset(DENSITY_EDGES_KEY, 'ac', '0');
+      const scheduler = makeScheduler(new RoutePlanner(thresholdGraph, weights));
       scheduler.requestImmediate(dispatch.dispatchId);
       await scheduler.stop();
       expect(scheduler.lastResult.routesCommitted).toBe(committed);
       expect((await repository.findLatest(dispatch.dispatchId))?.routeVersion).toBe(1 + committed);
     });
+  test('accepts a 140s alternative to a 100s historical route that now costs 200s', async () => {
+    await repository.saveNewVersionWithOutbox(input());
+    const slowerGraph = RoadGraph.load({...graphDocument, edges: graphDocument.edges.map(edge =>
+      ({...edge, lengthM: edge.lanes === 1 ? 100 : 140, speedLimitMps: 2}))});
+    const density = String(Math.SQRT2 * 10); // Each 50s accepted-route edge now costs 100s.
+    await redis.hset(DENSITY_EDGES_KEY, 'ab', density, 'bd', density, 'ac', '0');
+    const scheduler = makeScheduler(new RoutePlanner(slowerGraph, weights));
+    expect(await scheduler.tick()).toMatchObject({routesCommitted: 1});
+    expect(await repository.findLatest(dispatch.dispatchId)).toMatchObject({
+      routeVersion: 2, estimatedDuration: 140, roadSegments: ['ac', 'cd'],
+    });
+  });
+  test('keeps an accepted route when movement alone shortens the same remaining itinerary', async () => {
+    await repository.saveNewVersionWithOutbox(input());
+    const acceptedGraph = RoadGraph.load({...graphDocument, edges: graphDocument.edges.map(edge =>
+      ({...edge, speedLimitMps: 2, lengthM: edge.lanes === 1 ? 100 : 160}))});
+    await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'latitude', '0.001');
+    const scheduler = makeScheduler(new RoutePlanner(acceptedGraph, weights));
+    expect(await scheduler.tick()).toMatchObject({routesCommitted: 0});
+    expect(await repository.findLatest(dispatch.dispatchId)).toMatchObject({
+      routeVersion: 1, estimatedDuration: 100, roadSegments: ['ab', 'bd'],
+    });
+  });
   test('immediate bursts and timer ticks never overlap a search and coalesce to one follow-up', async () => {
     let release!: () => void, entered!: () => void, searches = 0, concurrent = 0, maximum = 0;
     const gate = new Promise<void>(resolve => {release = resolve;});
     const started = new Promise<void>(resolve => {entered = resolve;});
-    const scheduler = makeScheduler({findRoute: async (origin, destination, snapshot) => {
+    const scheduler = makeScheduler({estimateRemainingSeconds: planner.estimateRemainingSeconds.bind(planner), findRoute: async (origin, destination, snapshot) => {
       searches++; concurrent++; maximum = Math.max(maximum, concurrent); entered();
       await gate; concurrent--;
       return planner.findRoute(origin, destination, snapshot);
@@ -173,7 +199,7 @@ describe('Slow-Path scheduler', () => {
     expect(await repository.findLatest(dispatch.dispatchId)).toBeNull();
   });
   test('a dispatch completing during planning is not given a route', async () => {
-    const scheduler = makeScheduler({findRoute: async (origin, destination, snapshot) => {
+    const scheduler = makeScheduler({estimateRemainingSeconds: planner.estimateRemainingSeconds.bind(planner), findRoute: async (origin, destination, snapshot) => {
       await dispatches.completeAndEnqueueClears(dispatch.dispatchId);
       return planner.findRoute(origin, destination, snapshot);
     }});

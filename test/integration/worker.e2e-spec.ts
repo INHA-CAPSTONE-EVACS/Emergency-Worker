@@ -1,9 +1,10 @@
 import {latLngToCell} from 'h3-js';
 import {connect} from 'node:net';
+import {Pool} from 'pg';
 import Redis from 'ioredis';
 import {loadConfig} from '../../src/config/config';
 import {Worker} from '../../src/worker';
-import {cellVehiclesKey, vehicleStateKey, dispatchStateKey, parseStreamEvent, DENSITY_META_KEY,
+import {cellVehiclesKey, vehicleStateKey, dispatchStateKey, dispatchConeKey, parseStreamEvent, DENSITY_META_KEY,
   DENSITY_CELLS_KEY, DENSITY_EDGES_KEY} from '../../src/domain/contracts';
 import type {VehicleState} from '../../src/domain/types';
 import {RedisAlertOutboxDispatcher} from '../../src/publishing/redis-alert-outbox-dispatcher';
@@ -130,6 +131,52 @@ describe('composed worker', () => {
     expect(await status()).toBe(200);
   });
 
+  test('creates and publishes alert intent and acknowledges state while PostgreSQL is unavailable', async () => {
+    const unavailable = new Pool({host: '127.0.0.1', port: 1, connectionTimeoutMillis: 100});
+    worker = new Worker({...config, routePersistenceEnabled: true}, {redis: fixture.redis, pool: unavailable, logger: quiet});
+    try {
+      await worker.start();
+      const emergency = vehicle({lastMeasuredAt: Date.now()});
+      await seed(emergency);
+      await seed(target({lastMeasuredAt: Date.now()}));
+      await new DispatchStateStore(fixture.redis, config).save(dispatch);
+      await fixture.redis.set('dispatch:vehicle:ambulance', dispatch.dispatchId);
+      await notify(emergency);
+      await eventually(async () => await fixture.redis.xlen(config.alertOutboxStream) === 1);
+      expect(await fixture.redis.exists(dispatchConeKey(dispatch.dispatchId))).toBe(1);
+      await eventually(async () => await fixture.redis.xlen(config.gatewayAlertStream) === 1
+        && (await fixture.redis.xpending(config.stateStream, config.vehicleConsumerGroup))[0] === 0);
+      expect(await fixture.redis.xlen(config.dlqStream)).toBe(0);
+      expect((await worker.readiness()).reasons).toContain('PostgreSQL or route schema unavailable');
+    } finally {await worker.stop(); await unavailable.end();}
+  });
+
+  test('delivers Redis alert intent while a PostgreSQL outbox read is stalled', async () => {
+    const {promise: started, resolve: start} = Promise.withResolvers<void>();
+    const {promise: waiting, resolve: release} = Promise.withResolvers<void>();
+    jest.spyOn(DispatchRouteRepository.prototype, 'findPendingOutbox').mockImplementation(async () => {
+      start();
+      await waiting;
+      return [];
+    });
+    worker = new Worker({...config, routePersistenceEnabled: true}, {redis: fixture.redis, pool, logger: quiet});
+    await worker.start();
+    try {
+      await started;
+      const emergency = vehicle({lastMeasuredAt: Date.now()});
+      await seed(emergency);
+      await seed(target({lastMeasuredAt: Date.now()}));
+      await new DispatchStateStore(fixture.redis, config).save(dispatch);
+      await fixture.redis.set('dispatch:vehicle:ambulance', dispatch.dispatchId);
+      await notify(emergency);
+      await eventually(async () => await fixture.redis.xlen(config.alertOutboxStream) === 1);
+      await eventually(async () => await fixture.redis.xlen(config.gatewayAlertStream) === 1);
+    } finally {
+      release();
+      await worker.stop();
+    }
+  });
+
   test('bounds shutdown and leaves an unfinished decision pending for restart', async () => {
     let release!: () => void, entered = false;
     const gate = new Promise<void>(resolve => {release = resolve;});
@@ -230,6 +277,36 @@ describe('composed worker', () => {
       payload: {routeVersion: 1, targetVehicleId: 'ambulance', estimatedTravelSeconds: 20}});
     expect((await pool.query('SELECT road_segments FROM dispatch_route')).rows[0].road_segments).toEqual(['ac', 'cd']);
     expect(await status()).toBe(200);
+  });
+
+  test('recovers an accepted route before density is available and reuses it after PostgreSQL goes offline', async () => {
+    const repository = new DispatchRouteRepository(pool);
+    await repository.saveNewVersionWithOutbox(input());
+    const store = new DispatchStateStore(fixture.redis, config);
+    await store.save(dispatch);
+    await fixture.redis.set('dispatch:vehicle:ambulance', dispatch.dispatchId);
+    await fixture.redis.sadd('dispatch:active', dispatch.dispatchId);
+    const emergency = vehicle({lastMeasuredAt: Date.now()});
+    await seed(emergency);
+    const routed = {...config, routePersistenceEnabled: true, graphPath: 'test/fixtures/road-graph.json', routeIntervalMs: 1000};
+    worker = new Worker(routed, {redis: fixture.redis, pool, logger: quiet});
+    await worker.start();
+    await eventually(async () => (await store.findById(dispatch.dispatchId))?.routeVersion === 1);
+    await notify(emergency);
+    await eventually(async () => (await store.findCone(dispatch.dispatchId)) !== null);
+    expect(await store.findCone(dispatch.dispatchId)).toMatchObject({route: {roadSegments: ['ab', 'bd']}});
+    await worker.stop();
+    await fixture.redis.del(dispatchConeKey(dispatch.dispatchId));
+    const unavailable = new Pool({host: '127.0.0.1', port: 1, connectionTimeoutMillis: 100});
+    worker = new Worker(routed, {redis: fixture.redis, pool: unavailable, logger: quiet});
+    try {
+      await worker.start();
+      const newer = vehicle({...emergency, stateVersion: 2, lastMeasuredAt: Date.now()});
+      await seed(newer);
+      await notify(newer);
+      await eventually(async () => (await store.findCone(dispatch.dispatchId)) !== null);
+      expect(await store.findCone(dispatch.dispatchId)).toMatchObject({route: {roadSegments: ['ab', 'bd']}});
+    } finally {await worker.stop(); await unavailable.end();}
   });
 
   test('reports a required PostgreSQL failure and density configuration mismatch', async () => {

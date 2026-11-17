@@ -18,6 +18,7 @@ describe('Fast-Path decision deltas', () => {
   let fixture: ReturnType<typeof redisFixture>;
   let dispatches: DispatchStateStore;
   let service: YieldDecisionService;
+  let decisions: DecisionStore;
   let lifecycle: DispatchLifecycleService;
   const now = Date.parse('2026-11-16T12:00:00.000Z');
   const emergency = vehicle({vehicleId: state.emergencyVehicleId, lastMeasuredAt: now});
@@ -37,7 +38,8 @@ describe('Fast-Path decision deltas', () => {
     await lifecycle.onDispatched({eventId: 'dispatch', eventType: 'EMERGENCY_DISPATCHED', schemaVersion: 1,
       producer: 'emergency-service', occurredAt: state.updatedAt, payload: {dispatchId: state.dispatchId,
         emergencyId: state.emergencyId, vehicleId: state.emergencyVehicleId, origin: state.origin, destination: state.destination}});
-    service = new YieldDecisionService(lifecycle, dispatches, new DecisionStore(fixture.redis, config),
+    decisions = new DecisionStore(fixture.redis, config);
+    service = new YieldDecisionService(lifecycle, dispatches, decisions,
       new VehicleIndexReader(fixture.redis), new MovingConeCalculator(), new YieldTargetEvaluator(),
       new YieldActionResolver(), config, () => now);
     await seed(emergency);
@@ -127,6 +129,59 @@ describe('Fast-Path decision deltas', () => {
     ]));
     expect((await dispatches.findById(state.dispatchId))?.decisionVersion).toBe(3);
     expect(await events()).toHaveLength(4);
+  });
+
+  test('a target move with no decision delta fences an older alert before it reaches the outbox', async () => {
+    await service.onEmergencyVehicleMoved(emergency.vehicleId);
+    await seed(normal());
+    const {promise: paused, resolve: pauseReached} = Promise.withResolvers<void>();
+    const {promise: resume, resolve: resumeOlder} = Promise.withResolvers<void>();
+    const commit = decisions.compareSaveAndEnqueue.bind(decisions);
+    jest.spyOn(decisions, 'compareSaveAndEnqueue').mockImplementationOnce(async (...args) => {
+      pauseReached();
+      await resume;
+      return commit(...args);
+    });
+    const older = service.onNormalVehicleMoved('target');
+    try {
+      await paused;
+      const behind = normal({latitude: -0.001, stateVersion: 2});
+      await seed(behind);
+      // The index still picks the target up, but the newer position is ineligible.
+      expect((await dispatches.findCone(state.dispatchId))?.cells).toContain(behind.h3CellId);
+      await service.onNormalVehicleMoved('target');
+      expect((await dispatches.findById(state.dispatchId))?.decisionVersion).toBe(0);
+    } finally {
+      resumeOlder();
+      await older;
+    }
+    expect(await events()).toEqual([]);
+    expect(await dispatches.findDecisions(state.dispatchId)).toEqual([]);
+  });
+
+  test('a target reappearing with the same eligibility prevents a stale clear after state expiry', async () => {
+    await seed(normal());
+    await service.onEmergencyVehicleMoved(emergency.vehicleId);
+    await fixture.redis.del(vehicleStateKey('target'));
+    const {promise: paused, resolve: pauseReached} = Promise.withResolvers<void>();
+    const {promise: resume, resolve: resumeOlder} = Promise.withResolvers<void>();
+    const commit = decisions.compareSaveAndEnqueue.bind(decisions);
+    jest.spyOn(decisions, 'compareSaveAndEnqueue').mockImplementationOnce(async (...args) => {
+      pauseReached();
+      await resume;
+      return commit(...args);
+    });
+    const older = service.onNormalVehicleMoved('target');
+    try {
+      await paused;
+      await seed(normal({stateVersion: 2}));
+      await service.onNormalVehicleMoved('target');
+    } finally {
+      resumeOlder();
+      await older;
+    }
+    expect((await events()).map(event => event.eventType)).toEqual(['YIELD_ALERT_REQUESTED']);
+    expect(await dispatches.findDecisions(state.dispatchId)).toHaveLength(1);
   });
 
   test('an older no-op emergency evaluation cannot replace a newer cone or hide a normal update', async () => {

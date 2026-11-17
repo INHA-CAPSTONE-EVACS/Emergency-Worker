@@ -18,7 +18,7 @@ const invalid = (message: string): never => {throw new DensitySnapshotError('INV
 const record = (value: unknown): value is Record<string, string> => typeof value === 'object' && value !== null && !Array.isArray(value)
   && Object.values(value).every(item => typeof item === 'string');
 
-/** Density counts are vehicles per directed edge; roadCapacity is vehicles per lane. */
+/** Both Location edge density and roadCapacity are in vehicles per kilometre per lane. */
 export class EdgeWeightCalculator {
   constructor(private readonly redis: Pick<Redis, 'multi'>, private readonly config: WeightConfig) {}
 
@@ -80,7 +80,7 @@ export class EdgeWeightCalculator {
     if (snapshot.edgeDensity.startsWith('disabled:')) return 0;
     const value = snapshot.edges[edge.id] ?? 0;
     if (!Number.isFinite(value) || value < 0) return invalid('Invalid edge density');
-    return value / (this.config.roadCapacity * edge.lanes);
+    return value / this.config.roadCapacity;
   }
 
   private assertResolution(resolution: number): void {

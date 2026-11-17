@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import type {WorkerConfig} from '../config/config';
 import {WORKER_EVENT_PRODUCER, YIELD_ALERT_CLEAR_REQUESTED, YIELD_ALERT_REQUESTED,
-  type ClearReason, type VehicleStateUpdatedEvent} from '../domain/contracts';
+  type ClearReason, type Coordinates, type VehicleStateUpdatedEvent} from '../domain/contracts';
 import type {Cone, DecisionDiff, DispatchState, OutboxRecord, RouteResult, YieldDecision} from '../domain/types';
 import type {DispatchLifecycleService} from '../dispatch/dispatch-lifecycle-service';
 import type {VehicleStateFastPath} from '../dispatch/vehicle-state-subscriber';
@@ -14,7 +14,11 @@ import type {YieldActionResolver} from './yield-action-resolver';
 import type {YieldTargetEvaluator} from './yield-target-evaluator';
 
 export interface EvaluationOptions {targetVehicleId?: string; route?: RouteResult}
-type ActiveCone = Cone & {route?: RouteResult; sourceEmergencyStateVersion?: number};
+type ActiveCone = Cone & {route?: RouteResult; sourceEmergencyStateVersion?: number;
+  sourceRouteVersion?: number; routeDestination?: Coordinates};
+const sameDestination = (a: Coordinates, b: Coordinates) => a.latitude === b.latitude && a.longitude === b.longitude;
+const routeContextChanged = (cone: ActiveCone, dispatch: DispatchState) => (cone.sourceRouteVersion ?? 0) !== dispatch.routeVersion
+  || (cone.routeDestination !== undefined && !sameDestination(cone.routeDestination, dispatch.destination));
 const semanticFields = ['alertId', 'emergencyId', 'dispatchId', 'emergencyVehicleId', 'targetVehicleId',
   'approachDirection', 'estimatedArrivalSeconds', 'recommendedAction', 'reason'] as const;
 const sameDecision = (a: YieldDecision, b: YieldDecision) => semanticFields.every(field => a[field] === b[field]);
@@ -44,11 +48,12 @@ export class YieldDecisionService implements VehicleStateFastPath {
   async onNormalVehicleMoved(vehicleId: string): Promise<void> {
     const [target] = await this.vehicles.getStates([vehicleId]);
     for (const dispatch of await this.lifecycle.findActiveDispatches()) {
-      const cone = await this.dispatches.findCone(dispatch.dispatchId);
+      const cone = await this.dispatches.findCone(dispatch.dispatchId) as ActiveCone | null;
       if (!cone) continue;
       // An alerted target must also be examined after leaving the cone or becoming inactive.
       const previous = await this.dispatches.findDecisions(dispatch.dispatchId);
-      if ((target && cone.cells.includes(target.h3CellId)) || previous.some(value => value.targetVehicleId === vehicleId)) {
+      if (routeContextChanged(cone, dispatch) || (target && cone.cells.includes(target.h3CellId))
+        || previous.some(value => value.targetVehicleId === vehicleId)) {
         await this.evaluate(dispatch.dispatchId, {targetVehicleId: vehicleId});
       }
     }
@@ -59,29 +64,38 @@ export class YieldDecisionService implements VehicleStateFastPath {
       const dispatch = await this.dispatches.findById(dispatchId);
       if (!dispatch || dispatch.status === 'COMPLETED' || dispatch.status === 'CANCELED') return null;
       const timestamp = this.now(), cutoff = timestamp - this.config.inactiveTtlMs;
-      const [emergency] = await this.vehicles.getStates([dispatch.emergencyVehicleId]);
+      const emergencySource = await this.vehicles.getStateSnapshot([dispatch.emergencyVehicleId]);
+      const [emergency] = emergencySource.states;
       if (!emergency || emergency.vehicleType !== 'EMERGENCY' || emergency.lastMeasuredAt <= cutoff) return null;
       const previous = await this.dispatches.findDecisions(dispatchId);
       const previousCone = await this.dispatches.findCone(dispatchId) as ActiveCone | null;
-      const route = options.route ?? previousCone?.route;
-      let cone: ActiveCone | null;
+      const routeChanged = previousCone !== null && routeContextChanged(previousCone, dispatch);
+      const cached = dispatch.acceptedRoute;
+      const route = options.route ?? (cached
+        ? (sameDestination(cached.destination, dispatch.destination) ? cached.route : undefined)
+        : (routeChanged ? undefined : previousCone?.route));
+      const targetId = options.targetVehicleId;
+      if (targetId && !previousCone) return null;
+      const targeted = targetId !== undefined && previousCone !== null && !routeChanged
+        && previousCone.sourceEmergencyStateVersion === emergency.stateVersion;
+      let cone: ActiveCone;
       let ids: string[];
-      if (options.targetVehicleId) {
+      if (targeted) {
         cone = previousCone;
-        if (!cone) return null;
-        ids = [options.targetVehicleId];
+        ids = [targetId];
       } else {
         const rebuilt = route ? this.cones.buildRouteCone(emergency, route, this.graph) : this.cones.buildCone(emergency);
         // Persist route context with the cone so notifications and process restarts use the same topology.
-        cone = {...rebuilt, ...(route ? {route} : {}), sourceEmergencyStateVersion: emergency.stateVersion};
-        if (!await this.dispatches.saveCone(dispatchId, cone, emergency.stateVersion)) continue;
+        cone = {...rebuilt, ...(route ? {route} : {}), sourceEmergencyStateVersion: emergency.stateVersion,
+          sourceRouteVersion: dispatch.routeVersion, routeDestination: dispatch.destination};
+        if (!await this.dispatches.saveCone(dispatchId, cone, emergency.stateVersion, dispatch)) continue;
         // Include former targets in the bulk read to distinguish passing from other removals.
         ids = [...new Set([...await this.vehicles.findVehicleIdsInCells(cone.cells, cutoff),
           ...previous.map(value => value.targetVehicleId)])];
       }
-      const states = await this.vehicles.getStates(ids);
+      const {states, versions} = await this.vehicles.getStateSnapshot(ids);
       const candidates = this.evaluator.filterCandidates(emergency, states.filter(value => value.lastMeasuredAt > cutoff), cone, route);
-      const next = options.targetVehicleId ? previous.filter(value => value.targetVehicleId !== options.targetVehicleId) : [];
+      const next = targeted ? previous.filter(value => value.targetVehicleId !== targetId) : [];
       const issuedAt = new Date(timestamp).toISOString();
       for (const candidate of candidates) {
         const target = candidate.vehicle;
@@ -112,13 +126,19 @@ export class YieldDecisionService implements VehicleStateFastPath {
         if (next.some(value => value.targetVehicleId === old.targetVehicleId)) continue;
         const target = states.find(value => value.vehicleId === old.targetVehicleId);
         const reason: ClearReason = target && this.evaluator.isPassed(emergency, target) ? 'EMERGENCY_PASSED'
-          : options.route ? 'ROUTE_CHANGED' : 'NO_LONGER_RELEVANT';
+          : options.route || routeChanged ? 'ROUTE_CHANGED' : 'NO_LONGER_RELEVANT';
         const eventKey = decisionEventKey(dispatchId, dispatch.decisionVersion + 1, YIELD_ALERT_CLEAR_REQUESTED, old.targetVehicleId);
         records.push({eventKey, event: {eventId: eventKey, eventType: YIELD_ALERT_CLEAR_REQUESTED,
           schemaVersion: 1, occurredAt: issuedAt, producer: WORKER_EVENT_PRODUCER,
           payload: {alertId: old.alertId, dispatchId, targetVehicleId: old.targetVehicleId, reason}}});
       }
-      const result = await this.decisions.compareSaveAndEnqueue(dispatchId, dispatch.decisionVersion, next, records, cone);
+      const changedSources = new Map(records.map(({event}) => {
+        const id = event.payload.targetVehicleId;
+        return [id, versions.get(id) ?? null];
+      }));
+      changedSources.set(emergency.vehicleId, emergencySource.versions.get(emergency.vehicleId) ?? null);
+      const result = await this.decisions.compareSaveAndEnqueue(dispatchId, dispatch.decisionVersion, next, records, cone,
+        {sourceVersions: changedSources, dispatch});
       if (result.accepted) return result;
       // A concurrent evaluator or completion won. Re-read all authoritative input before retrying.
     }

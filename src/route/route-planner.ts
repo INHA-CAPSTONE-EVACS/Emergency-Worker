@@ -69,6 +69,26 @@ export class RoutePlanner {
     return {outcome: 'NO_ROUTE', reason: 'DISCONNECTED'};
   }
 
+  /** Price the accepted directed suffix from the same snapped endpoints used by findRoute. */
+  estimateRemainingSeconds(origin: Coordinates, destination: Coordinates, segments: readonly string[],
+    snapshot: DensitySnapshot): number | null {
+    const graph = this.graph;
+    if (!graph) return null;
+    const start = this.endpoint(origin), goal = this.endpoint(destination);
+    if (!start || !goal) return null;
+    if (start.id === goal.id) return 0;
+    const first = segments.findIndex(id => graph.getEdge(id)?.from === start.id);
+    if (first === -1) return null;
+    let node = start.id, seconds = 0;
+    for (const id of segments.slice(first)) {
+      const edge = graph.getEdge(id);
+      if (!edge || edge.from !== node || this.weights.isBlocked(edge, snapshot)) return null;
+      seconds += this.weights.weight(edge, snapshot);
+      node = edge.to;
+    }
+    return node === goal.id ? seconds : null;
+  }
+
   /** Congested means at or above per-lane capacity; blocked segments are included. */
   findCongestedSegments(segments: readonly string[], snapshot: DensitySnapshot): string[] {
     return [...new Set(segments)].filter(id => {
