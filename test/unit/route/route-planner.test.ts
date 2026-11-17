@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import {loadConfig} from '../../../src/config/config';
 import type {DensitySnapshot} from '../../../src/domain/types';
-import {EdgeWeightCalculator} from '../../../src/route/edge-weight-calculator';
+import {DensitySnapshotError, EdgeWeightCalculator} from '../../../src/route/edge-weight-calculator';
 import {RoadGraph} from '../../../src/route/road-graph';
 import {RoutePlanner} from '../../../src/route/route-planner';
 import document from '../../fixtures/road-graph.json';
@@ -43,6 +43,15 @@ describe('RoutePlanner', () => {
     expect(new RoutePlanner(null, weights).findRoute('a', 'd', density())).toEqual({outcome: 'NO_ROUTE', reason: 'GRAPH_UNAVAILABLE'});
     expect(new RoutePlanner(graph, weights).findRoute('missing', 'd', density())).toEqual({outcome: 'NO_ROUTE', reason: 'INVALID_ENDPOINT'});
     expect(new RoutePlanner(graph, weights).findRoute({latitude: NaN, longitude: 0}, 'd', density())).toEqual({outcome: 'NO_ROUTE', reason: 'INVALID_ENDPOINT'});
+  });
+  test('classifies graph and accepted snapshot H3 mismatch as configuration blocked', () => {
+    const resolution8Weights = new EdgeWeightCalculator({} as Pick<Redis, 'multi'>, {...config, h3Resolution: 8});
+    const planner = new RoutePlanner(graph, resolution8Weights);
+    const snapshot = {...density(), h3Resolution: 8};
+    expect(() => planner.findRoute('a', 'd', snapshot)).toThrow(DensitySnapshotError);
+    expect(() => planner.findRoute('a', 'd', snapshot)).toThrow(expect.objectContaining({
+      code: 'H3_RESOLUTION_MISMATCH', configurationBlocked: true,
+    }));
   });
   test('supports coordinate endpoints and a zero-edge route at the destination', () => {
     const planner = new RoutePlanner(graph, weights);

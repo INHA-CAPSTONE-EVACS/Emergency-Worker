@@ -1,7 +1,7 @@
 import type {Coordinates} from '../domain/contracts';
 import type {DensitySnapshot, RouteResult} from '../domain/types';
 import {distanceM} from '../decision/geometry';
-import {EdgeWeightCalculator} from './edge-weight-calculator';
+import {DensitySnapshotError, EdgeWeightCalculator} from './edge-weight-calculator';
 import {RoadGraph, type RoadEdge, type RoadNode} from './road-graph';
 
 type QueueEntry = {id: string; seconds: number; priority: number};
@@ -49,7 +49,9 @@ export class RoutePlanner {
     if (!this.graph) return {outcome: 'NO_ROUTE', reason: 'GRAPH_UNAVAILABLE'};
     const start = this.endpoint(origin), goal = this.endpoint(destination);
     if (!start || !goal) return {outcome: 'NO_ROUTE', reason: 'INVALID_ENDPOINT'};
-    if (snapshot.h3Resolution !== this.graph.h3Resolution) throw new Error('Graph and density H3 resolution mismatch');
+    if (snapshot.h3Resolution !== this.graph.h3Resolution) {
+      throw new DensitySnapshotError('H3_RESOLUTION_MISMATCH', 'Graph and density H3 resolution mismatch');
+    }
     const queue = new MinQueue(), costs = new Map<string, number>([[start.id, 0]]);
     const previous = new Map<string, RoadEdge>();
     queue.push({id: start.id, seconds: 0, priority: this.heuristic(start, goal)});
