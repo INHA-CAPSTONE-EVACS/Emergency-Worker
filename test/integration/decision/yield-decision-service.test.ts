@@ -78,8 +78,9 @@ describe('Fast-Path decision deltas', () => {
     expect((await dispatches.findDecisions(state.dispatchId))[0]).toMatchObject({alertId: first.alertId,
       decisionVersion: 2, estimatedArrivalSeconds: 20, issuedAt: '2026-11-16T12:00:01.000Z'});
     await new RedisAlertOutboxDispatcher(fixture.redis, config).dispatchPending();
-    const projected = await fixture.redis.xrange(config.gatewayAlertStream, '-', '+');
-    expect(projected.map(([, fields]) => JSON.parse(fields[fields.indexOf('payload') + 1]!).alertVersion)).toEqual([1, 2]);
+    const delivered = (await fixture.redis.xrange(config.alertStream, '-', '+')).map(([, fields]) => parseStreamEvent(fields))
+      .filter(event => event.eventType === 'YIELD_ALERT_REQUESTED');
+    expect(delivered.map(event => (event.payload as {decisionVersion: number}).decisionVersion)).toEqual([1, 2]);
   });
 
   test('normal updates reevaluate only that target and clear an exit exactly once', async () => {
@@ -271,12 +272,6 @@ describe('Fast-Path decision deltas', () => {
     expect(delivered).toHaveLength(2);
     expect(new Set(delivered.map(([, fields]) => fields[fields.indexOf('eventKey') + 1]))).toEqual(new Set([original.eventId]));
     expect(new Set(delivered.map(([, fields]) => parseStreamEvent(fields).eventId)).size).toBe(1);
-    const projections = await fixture.redis.xrange(config.gatewayAlertStream, '-', '+');
-    expect(projections).toHaveLength(2);
-    expect(new Set(projections.map(([, fields]) => {
-      const payload = JSON.parse(fields[fields.indexOf('payload') + 1]!);
-      return `${payload.alertId}:${payload.alertVersion}`;
-    })).size).toBe(1);
     expect(await events()).toHaveLength(1);
   });
 

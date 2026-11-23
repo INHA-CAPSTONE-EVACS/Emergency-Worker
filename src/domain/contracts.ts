@@ -1,13 +1,11 @@
 import {isValidCell} from 'h3-js';
 
-// Redis protocol names shared with Location Worker and the current Gateway.
+// Redis protocol names shared with Location Worker, Control API Server and Alert Worker.
 export const EVENT_FIELD = 'event';
-export const GATEWAY_PAYLOAD_FIELD = 'payload';
 export const STATE_STREAM = 'stream:vehicle:state';
 /** Control API Server Outbox stream (EVACS-API-Server `evacs.redis.emergency-stream`). */
 export const EMERGENCY_STREAM = 'evacs:stream:emergency-event';
 export const ALERT_STREAM = 'stream:alert:event';
-export const GATEWAY_ALERT_STREAM = 'evacs:stream:yield-alert';
 export const DLQ_STREAM = 'stream:emergency-worker:dlq';
 export const ALERT_OUTBOX_STREAM = 'stream:emergency-worker:alert-outbox';
 export const VEHICLE_CONSUMER_GROUP = 'emergency-worker:vehicle-state';
@@ -41,7 +39,7 @@ export const DENSITY_META_FIELDS = ['generation', 'generatedAt', 'intervalMs', '
 export const ENV = {
   redisUrl: 'REDIS_URL', databaseUrl: 'DATABASE_URL', h3Resolution: 'H3_RESOLUTION',
   inactiveTtlMs: 'INACTIVE_TTL_MS', stateStream: 'STATE_STREAM', emergencyStream: 'EMERGENCY_STREAM',
-  alertStream: 'ALERT_STREAM', gatewayAlertStream: 'EVACS_ALERT_STREAM', dlqStream: 'DLQ_STREAM',
+  alertStream: 'ALERT_STREAM', dlqStream: 'DLQ_STREAM',
   alertOutboxStream: 'ALERT_OUTBOX_STREAM', vehicleConsumerGroup: 'VEHICLE_CONSUMER_GROUP',
   emergencyConsumerGroup: 'EMERGENCY_CONSUMER_GROUP', consumerName: 'CONSUMER_NAME', instanceId: 'INSTANCE_ID',
   routeIntervalMs: 'ROUTE_INTERVAL_MS', alertTtlMs: 'ALERT_TTL_MS', graphPath: 'GRAPH_PATH',
@@ -133,12 +131,6 @@ export const YIELD_ALERT_REQUEST_FIELDS = ['alertId', 'emergencyId', 'dispatchId
   'targetVehicleId', 'approachDirection', 'estimatedArrivalSeconds', 'recommendedAction', 'reason', 'decisionVersion', 'expiresAt'] as const;
 export const YIELD_ALERT_CLEAR_FIELDS = ['alertId', 'dispatchId', 'targetVehicleId', 'reason'] as const;
 export const ROUTE_UPDATE_FIELDS = ['dispatchId', 'targetVehicleId', 'routeVersion', 'destination', 'waypoints', 'congestedSegments', 'estimatedTravelSeconds'] as const;
-export const GATEWAY_ALERT_FIELDS = ['alertId', 'vehicleId', 'emergencyVehicleId', 'alertVersion', 'issuedAt', 'expiresAt', 'details'] as const;
-/** Gateway projection only; deliveryId is assigned by the receiving Gateway. */
-export interface GatewayYieldAlertPayload {
-  alertId: string; vehicleId: string; emergencyVehicleId: string; alertVersion: number;
-  issuedAt: string; expiresAt: string; details: YieldAlertRequestedEvent;
-}
 
 export class ContractError extends Error {
   constructor(message: string) { super(message); this.name = 'ContractError'; }

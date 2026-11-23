@@ -97,7 +97,7 @@ describe('composed worker', () => {
     } finally {if (timer) clearTimeout(timer); socket.destroy(); await stopping;}
   });
 
-  test('recovers committed alert intent on restart, projects Gateway payload and emits one canonical clear', async () => {
+  test('recovers committed alert intent on restart and emits one canonical clear', async () => {
     const logs: Record<string, unknown>[] = [];
     const unavailable = jest.spyOn(RedisAlertOutboxDispatcher.prototype, 'dispatchPending')
       .mockRejectedValue(new Error('publisher stopped'));
@@ -111,23 +111,23 @@ describe('composed worker', () => {
     await eventually(async () => await fixture.redis.exists(dispatchStateKey(dispatch.dispatchId)) === 1);
     await notify(emergency);
     await eventually(async () => await fixture.redis.xlen(config.alertOutboxStream) === 1);
-    expect(await fixture.redis.xlen(config.gatewayAlertStream)).toBe(0);
+    expect(await fixture.redis.xlen(config.alertStream)).toBe(0);
     expect(await worker.stop()).toEqual({drained: true});
     unavailable.mockRestore();
     worker = new Worker(config, {redis: fixture.redis, logger: {error() {}, info(_message, fields) {logs.push(fields ?? {});}}});
     await worker.start();
-    await eventually(async () => await fixture.redis.xlen(config.gatewayAlertStream) === 1);
-    const rows = await fixture.redis.xrange(config.gatewayAlertStream, '-', '+');
-    expect(JSON.parse(rows[0]![1][rows[0]![1].indexOf('payload') + 1]!)).toMatchObject({
-      vehicleId: 'target', emergencyVehicleId: 'ambulance', alertVersion: 1});
+    await eventually(async () => await fixture.redis.xlen(config.alertStream) === 1);
+    const rows = await fixture.redis.xrange(config.alertStream, '-', '+');
+    expect(parseStreamEvent(rows[0]![1])).toMatchObject({eventType: 'YIELD_ALERT_REQUESTED',
+      payload: {targetVehicleId: 'target', emergencyVehicleId: 'ambulance', decisionVersion: 1}});
     const moved = target({latitude: -0.001, stateVersion: 2, lastMeasuredAt: Date.now()});
     await seed(moved); await notify(moved); await notify(moved);
     await eventually(async () => await fixture.redis.xlen(config.alertStream) === 2);
     expect((await fixture.redis.xrange(config.alertStream, '-', '+')).map(([, fields]) => parseStreamEvent(fields).eventType))
       .toEqual(['YIELD_ALERT_REQUESTED', 'YIELD_ALERT_CLEAR_REQUESTED']);
-    expect(await fixture.redis.xlen(config.gatewayAlertStream)).toBe(1);
     expect(logs).toContainEqual(expect.objectContaining({eventType: 'YIELD_ALERT_CLEAR_REQUESTED',
       targetVehicleId: 'target', reason: 'EMERGENCY_PASSED'}));
+    expect(await fixture.redis.exists('evacs:stream:yield-alert')).toBe(0);
     expect(await status()).toBe(200);
   });
 
@@ -144,7 +144,7 @@ describe('composed worker', () => {
       await notify(emergency);
       await eventually(async () => await fixture.redis.xlen(config.alertOutboxStream) === 1);
       expect(await fixture.redis.exists(dispatchConeKey(dispatch.dispatchId))).toBe(1);
-      await eventually(async () => await fixture.redis.xlen(config.gatewayAlertStream) === 1
+      await eventually(async () => await fixture.redis.xlen(config.alertStream) === 1
         && (await fixture.redis.xpending(config.stateStream, config.vehicleConsumerGroup))[0] === 0);
       expect(await fixture.redis.xlen(config.dlqStream)).toBe(0);
       expect((await worker.readiness()).reasons).toContain('MySQL or route schema unavailable');
@@ -170,7 +170,7 @@ describe('composed worker', () => {
       await fixture.redis.set('dispatch:vehicle:ambulance', dispatch.dispatchId);
       await notify(emergency);
       await eventually(async () => await fixture.redis.xlen(config.alertOutboxStream) === 1);
-      await eventually(async () => await fixture.redis.xlen(config.gatewayAlertStream) === 1);
+      await eventually(async () => await fixture.redis.xlen(config.alertStream) === 1);
     } finally {
       release();
       await worker.stop();
@@ -234,7 +234,6 @@ describe('composed worker', () => {
         payload: {dispatchId: dispatch.dispatchId, alertId: 'alert-excluded', targetVehicleId: 'excluded', reason: 'ROUTE_CHANGED'}})}]);
     await eventually(async () => (await fixture.redis.xrange(config.alertStream, '-', '+'))
       .some(([, fields]) => parseStreamEvent(fields).eventType === 'YIELD_ALERT_CLEAR_REQUESTED'));
-    expect(await fixture.redis.xlen(config.gatewayAlertStream)).toBe(0);
   });
 
   test('keeps H3 mismatch pending and reports blocked readiness while liveness stays healthy', async () => {

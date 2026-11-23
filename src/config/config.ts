@@ -3,7 +3,7 @@ import * as contracts from '../domain/contracts';
 
 export interface WorkerConfig {
   redisUrl: string; databaseUrl: string | undefined; h3Resolution: number; inactiveTtlMs: number;
-  stateStream: string; emergencyStream: string; alertStream: string; gatewayAlertStream: string;
+  stateStream: string; emergencyStream: string; alertStream: string;
   dlqStream: string; alertOutboxStream: string; vehicleConsumerGroup: string; emergencyConsumerGroup: string;
   consumerName: string; instanceId: string; routeIntervalMs: number; alertTtlMs: number;
   graphPath: string | undefined; routePersistenceEnabled: boolean; readCount: number; blockMs: number;
@@ -52,7 +52,6 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     stateStream: read(e.stateStream) ?? contracts.STATE_STREAM,
     emergencyStream: read(e.emergencyStream) ?? contracts.EMERGENCY_STREAM,
     alertStream: read(e.alertStream) ?? contracts.ALERT_STREAM,
-    gatewayAlertStream: read(e.gatewayAlertStream) ?? contracts.GATEWAY_ALERT_STREAM,
     dlqStream: read(e.dlqStream) ?? contracts.DLQ_STREAM,
     alertOutboxStream: read(e.alertOutboxStream) ?? contracts.ALERT_OUTBOX_STREAM,
     vehicleConsumerGroup: read(e.vehicleConsumerGroup) ?? contracts.VEHICLE_CONSUMER_GROUP,
