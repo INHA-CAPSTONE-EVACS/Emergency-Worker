@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import {AwaitingPredecessorError} from '../consumer/errors';
-import {ACTIVE_DISPATCHES_KEY, dispatchStateKey, dispatchVehicleKey, type DispatchStatus, type EmergencyEvent,
-  type InputDispatchStatus} from '../domain/contracts';
+import {ACTIVE_DISPATCHES_KEY, createdDestination, createdOrigin, dispatchStateKey, dispatchVehicleKey, type Coordinates,
+  type DispatchStatus, type EmergencyEvent, type InputDispatchStatus} from '../domain/contracts';
 import type {DispatchState} from '../domain/types';
 import type {DispatchStateStore} from '../store/dispatch-state-store';
 
@@ -45,15 +45,35 @@ export class DispatchLifecycleService {
   constructor(private readonly redis: Redis, private readonly store: DispatchStateStore,
     private readonly routes: ImmediateRouteScheduler) {}
 
-  async onEmergencyCreated(_event: Extract<EmergencyEvent, {eventType: 'EMERGENCY_CREATED'}>): Promise<void> {
-    // An emergency registration has no assigned vehicle/dispatch and creates no active dispatch.
+  /**
+   * Control API Server contract: the emergency names its vehicle, so creation starts the dispatch, identified
+   * by the emergency ID. A registration without a vehicle (design p.100) creates no active dispatch.
+   */
+  async onEmergencyCreated(event: Extract<EmergencyEvent, {eventType: 'EMERGENCY_CREATED'}>): Promise<void> {
+    const p = event.payload;
+    if (p.vehicleId == null) return;
+    await this.activate({dispatchId: p.emergencyId, emergencyId: p.emergencyId, vehicleId: p.vehicleId,
+      origin: createdOrigin(p)!, destination: createdDestination(p)!}, event.occurredAt);
+  }
+
+  /** Completes every active dispatch of the emergency, including one not yet activated (dispatchId = emergencyId). */
+  async onEmergencyEnded(event: Extract<EmergencyEvent, {eventType: 'EMERGENCY_ENDED'}>): Promise<void> {
+    const {emergencyId} = event.payload;
+    const ids = new Set([emergencyId, ...(await this.findActiveDispatches())
+      .filter(dispatch => dispatch.emergencyId === emergencyId).map(dispatch => dispatch.dispatchId)]);
+    for (const id of ids) await this.completeDispatch(id, event.occurredAt);
   }
 
   async onDispatched(event: Extract<EmergencyEvent, {eventType: 'EMERGENCY_DISPATCHED'}>): Promise<void> {
     const p = event.payload;
+    await this.activate(p, event.occurredAt);
+  }
+
+  private async activate(p: {dispatchId: string; emergencyId: string; vehicleId: string; origin: Coordinates;
+    destination: Coordinates}, occurredAt: string): Promise<void> {
     await this.findActiveByVehicleId(p.vehicleId); // Repair a stale index left by a completion crash.
     const state: DispatchState = {dispatchId: p.dispatchId, emergencyId: p.emergencyId, emergencyVehicleId: p.vehicleId,
-      origin: p.origin, destination: p.destination, status: 'DISPATCHED', decisionVersion: 0, routeVersion: 0, updatedAt: event.occurredAt};
+      origin: p.origin, destination: p.destination, status: 'DISPATCHED', decisionVersion: 0, routeVersion: 0, updatedAt: occurredAt};
     const existing = await this.store.findById(p.dispatchId);
     if (existing && (existing.emergencyVehicleId !== p.vehicleId || existing.emergencyId !== p.emergencyId)) return;
     const accepted = await this.redis.eval(activateScript, 4, dispatchStateKey(p.dispatchId), ACTIVE_DISPATCHES_KEY,

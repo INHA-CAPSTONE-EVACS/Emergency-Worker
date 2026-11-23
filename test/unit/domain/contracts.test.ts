@@ -85,3 +85,35 @@ describe('canonical event codecs', () => {
     expect(() => parseStreamEvent(fields)).toThrow();
   });
 });
+
+describe('Control API Server emergency events', () => {
+  // EVACS-API-Server BrokerEventPublisher field layout; Java Instant.toString() keeps microseconds.
+  const flat = (eventType: string, payload: unknown, overrides: Record<string, string> = {}) => Object.entries({
+    eventId: '1efd7945-de90-44c9-9b09-c11128c4b40c', eventType, schemaVersion: '1',
+    aggregateType: 'EMERGENCY', aggregateId: 'EMG-001', occurredAt: '2026-11-23T06:43:25.308869Z',
+    producer: 'control-api', payload: JSON.stringify(payload), ...overrides}).flat();
+  const created = {emergencyId: 'EMG-001', vehicleId: 'AMB-001', emergencyType: 'MEDICAL', status: 'ACTIVE',
+    startedAt: '2026-11-23T06:43:25.293115713Z', origin: point, destination: point,
+    route: [{sequence: 0, ...point, h3Index: '8930e0a845bffff'}]};
+
+  test('reads the split envelope and normalizes the timestamp to milliseconds', () => {
+    expect(parseStreamEvent(flat('EMERGENCY_CREATED', created))).toEqual({eventId: '1efd7945-de90-44c9-9b09-c11128c4b40c',
+      eventType: 'EMERGENCY_CREATED', schemaVersion: 1, occurredAt: '2026-11-23T06:43:25.308Z',
+      producer: 'control-api', payload: created});
+  });
+  test('accepts EMERGENCY_ENDED with a null endedAt', () => {
+    expect(parseStreamEvent(flat('EMERGENCY_ENDED', {emergencyId: 'EMG-001', vehicleId: 'AMB-001',
+      status: 'ENDED', endedAt: null})).eventType).toBe('EMERGENCY_ENDED');
+  });
+  test.each([['schemaVersion', '2'], ['producer', ''], ['occurredAt', 'yesterday'], ['payload', '{']])(
+    'rejects %s=%p', (field, value) => {
+      expect(() => parseStreamEvent(flat('EMERGENCY_CREATED', created, {[field]: value}))).toThrow();
+    });
+  test('requires a destination only when the emergency names a vehicle', () => {
+    const {origin: _o, destination: _d, route: _r, ...bare} = created;
+    expect(() => parseStreamEvent(flat('EMERGENCY_CREATED', bare))).toThrow();
+    const {vehicleId: _v, ...registration} = bare;
+    expect(() => parseStreamEvent(flat('EMERGENCY_CREATED', registration))).not.toThrow();
+    expect(() => parseStreamEvent(flat('EMERGENCY_CREATED', {...bare, route: [{sequence: 0, ...point}]}))).not.toThrow();
+  });
+});

@@ -1,4 +1,4 @@
-/* Run from the stack root after setup-local.sh and the explicit PostgreSQL migration. */
+/* Run from the stack root after setup-local.sh and scripts/migrate-local.sh (MySQL worker tables). */
 const assert = require('node:assert/strict');
 const {randomUUID} = require('node:crypto');
 const {createRequire} = require('node:module');
@@ -22,13 +22,18 @@ async function eventually(check, description) {
 }
 async function main() {
   const redis = new Redis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6401/0', {maxRetriesPerRequest: 1});
-  const dispatchId = randomUUID(), emergencyId = `sandbox-${dispatchId}`;
-  const emergencyVehicleId = `sandbox-ambulance-${dispatchId}`, targetVehicleId = `sandbox-target-${dispatchId}`;
+  const runId = randomUUID();
+  const emergencyVehicleId = `sandbox-ambulance-${runId}`, targetVehicleId = `sandbox-target-${runId}`;
   const sockets = [];
-  let activated = false;
-  const event = (eventType, payload) => ({eventId: randomUUID(), eventType, schemaVersion: 1,
-    occurredAt: new Date().toISOString(), producer: 'local-sandbox', payload});
-  const append = value => redis.xadd('stream:emergency:event', '*', 'event', JSON.stringify(value));
+  // The Control API Server owns emergency creation/termination; its Outbox publishes to the worker.
+  const api = process.env.CONTROL_API_URL ?? 'http://127.0.0.1:18090';
+  const control = async (path, body) => {
+    const response = await fetch(`${api}/control/emergencies${path}`, {method: body === undefined ? 'GET' : 'POST',
+      headers: {'content-type': 'application/json'}, ...(body === undefined || body === null ? {} : {body: JSON.stringify(body)})});
+    assert.ok(response.ok, `${path || 'create'} returned ${response.status}`);
+    return await response.json();
+  };
+  let dispatchId;
   try {
     const readiness = await fetch(process.env.WORKER_HEALTH_URL ?? 'http://127.0.0.1:18082/readyz');
     assert.equal(readiness.status, 200);
@@ -63,11 +68,16 @@ async function main() {
     };
     await location(target, targetVehicleId, 37.4518, 5, 0);
     await location(ambulance, emergencyVehicleId, 37.45, 20, 0);
-    await append(event('EMERGENCY_DISPATCHED', {dispatchId, emergencyId, vehicleId: emergencyVehicleId,
-      origin: {latitude: 37.45, longitude: 126.65}, destination: {latitude: 37.46, longitude: 126.65}}));
-    activated = true;
-    await eventually(async () => await redis.exists(`dispatch:${dispatchId}:state`), 'dispatch activation');
+    // Under the API contract the dispatch is identified by the emergency ID.
+    dispatchId = (await control('', {vehicleId: emergencyVehicleId, emergencyType: 'MEDICAL',
+      originLat: 37.45, originLng: 126.65, destinationLat: 37.46, destinationLng: 126.65})).id;
+    await eventually(async () => await redis.exists(`dispatch:${dispatchId}:state`), 'dispatch activation from the API Outbox');
     await location(ambulance, emergencyVehicleId, 37.45, 20, 1);
+    const cone = await eventually(async () => {
+      const value = await control(`/${dispatchId}/cone`);
+      return value.available && value;
+    }, 'cone projected for GET /control/emergencies/{id}/cone');
+    assert.equal(cone.vehicleId, emergencyVehicleId);
     await eventually(async () => alerts.length, 'Gateway yield.alert delivery');
     assert.equal(alerts[0].type, 'YIELD_ALERT_ISSUED');
     assert.equal(alerts[0].details.payload.targetVehicleId, targetVehicleId);
@@ -94,13 +104,15 @@ async function main() {
     const clears = requests.filter(value => value.eventType === 'YIELD_ALERT_CLEAR_REQUESTED');
     assert.equal(clears.length, 1);
     assert.equal(clears[0].payload.reason, 'EMERGENCY_PASSED');
-    console.log(JSON.stringify({result: 'PASS', dispatchId, emergencyVehicleId, targetVehicleId,
-      gatewayMessage: alerts[0].type, clearEventKey: clears[0].eventId,
-      scope: 'live SUMO events plus deterministic Gateway → Location Worker → Emergency Worker → Gateway alert and canonical clear'}));
+    await control(`/${dispatchId}/end`, null);
+    await eventually(async () => !await redis.exists(`dispatch:${dispatchId}:state`), 'completion from EMERGENCY_ENDED');
+    assert.equal((await control(`/${dispatchId}/cone`)).available, false);
+    console.log(JSON.stringify({result: 'PASS', emergencyId: dispatchId, emergencyVehicleId, targetVehicleId,
+      gatewayMessage: alerts[0].type, clearEventKey: clears[0].eventId, coneCells: cone.cells.length,
+      scope: 'Control API create/end → Outbox → Emergency Worker; live SUMO plus deterministic Gateway → Location Worker → Emergency Worker → Gateway alert, canonical clear and dashboard cone'}));
   } finally {
     try {
-      if (activated) await append(event('EMERGENCY_STATUS_CHANGED', {dispatchId, emergencyId,
-        previousStatus: 'DISPATCHED', currentStatus: 'COMPLETED'}));
+      if (dispatchId) await fetch(`${api}/control/emergencies/${dispatchId}/end`, {method: 'POST'}).catch(() => undefined);
     } finally {
       for (const socket of sockets) socket.disconnect();
       await redis.quit();

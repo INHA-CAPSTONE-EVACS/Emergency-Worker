@@ -11,6 +11,8 @@ export interface WorkerConfig {
   shutdownDrainTimeoutMs: number; healthPort: number; bprAlpha: number; bprBeta: number;
   /** Vehicles per kilometre per lane, matching the Location edge-density snapshot. */
   roadCapacity: number; blockedMultiplier: number;
+  /** Control API Server cone key; must contain %s for the emergency ID. */
+  coneKeyPattern: string;
 }
 export interface ConfigIssue {variable: string; message: string}
 export class ConfigError extends Error {
@@ -67,7 +69,11 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     bprAlpha: number(e.bprAlpha, 0.15, 0, Number.MAX_VALUE, false),
     bprBeta: number(e.bprBeta, 4, 1, Number.MAX_VALUE, false),
     roadCapacity: positive(e.roadCapacity, 180), blockedMultiplier: number(e.blockedMultiplier, 10, 1, Number.MAX_VALUE, false),
+    coneKeyPattern: read(e.coneKeyPattern) ?? contracts.CONE_PROJECTION_KEY_PATTERN,
   };
+  if ((config.coneKeyPattern.match(/%s/g) ?? []).length !== 1) {
+    issues.push({variable: e.coneKeyPattern, message: 'must contain exactly one %s'});
+  }
   if (issues.length) throw new ConfigError(issues);
   return config;
 }

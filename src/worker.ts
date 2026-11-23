@@ -1,6 +1,6 @@
 import {readFile} from 'node:fs/promises';
 import type Redis from 'ioredis';
-import type {Pool} from 'pg';
+import type {Pool} from 'mysql2/promise';
 import type {WorkerConfig} from './config/config';
 import {YIELD_ALERT_CLEAR_REQUESTED} from './domain/contracts';
 import type {EventPublisher} from './domain/types';
@@ -14,7 +14,7 @@ import {EmergencyEventSubscriber} from './dispatch/emergency-event-subscriber';
 import {VehicleStateSubscriber} from './dispatch/vehicle-state-subscriber';
 import {HealthServer, type HealthStatus} from './infra/health-server';
 import {logger, type Logger} from './infra/logger';
-import {createPostgres} from './infra/postgres';
+import {createMysql} from './infra/mysql';
 import {createRedis} from './infra/redis';
 import {RedisAlertOutboxDispatcher} from './publishing/redis-alert-outbox-dispatcher';
 import {RedisStreamEventPublisher} from './publishing/redis-stream-event-publisher';
@@ -30,7 +30,7 @@ import {DispatchStateStore} from './store/dispatch-state-store';
 import {VehicleIndexReader} from './store/vehicle-index-reader';
 
 export interface WorkerDependencies {redis?: Redis; pool?: Pool; logger?: Logger}
-/** Owns its Redis connections; an injected PostgreSQL pool remains caller-owned. */
+/** Owns its Redis connections; an injected MySQL pool remains caller-owned. */
 export class Worker {
   private readonly log: Logger;
   private readonly health: HealthServer;
@@ -101,8 +101,7 @@ export class Worker {
     const alertOutbox = new RedisAlertOutboxDispatcher(publisherConnection, this.config, publisher);
     let routeOutbox: RouteOutboxDispatcher | undefined;
     if (this.config.routePersistenceEnabled) {
-      this.pool = this.dependencies.pool ?? createPostgres(this.config, {query_timeout: 2000, statement_timeout: 2000});
-      this.pool.on('error', this.onPoolError);
+      this.pool = this.dependencies.pool ?? createMysql(this.config);
       const repository = new DispatchRouteRepository(this.pool);
       this.weights = new EdgeWeightCalculator(density, this.config);
       routeOutbox = new RouteOutboxDispatcher(repository, publisher, this.config.alertStream);
@@ -151,7 +150,6 @@ export class Worker {
     this.log.info('Emergency Worker started', {healthUrl: this.healthUrl, routing: this.config.routePersistenceEnabled,
       graph: graph?.version ?? 'unavailable'});
   }
-  private readonly onPoolError = (error: Error) => this.log.error('PostgreSQL connection error', error);
 
   async readiness(): Promise<HealthStatus> {
     const reasons: string[] = [], degraded: string[] = [];
@@ -163,9 +161,9 @@ export class Worker {
       try {await redis.ping();} catch {reasons.push(`redis connection ${index} unavailable`);}
     }));
     if (this.pool) {
-      try {await this.pool.query('SELECT route_id FROM dispatch_route LIMIT 0');
-        await this.pool.query('SELECT outbox_id FROM emergency_route_outbox LIMIT 0');}
-      catch {reasons.push('PostgreSQL or route schema unavailable');}
+      try {await this.pool.query({sql: 'SELECT route_id FROM dispatch_route LIMIT 0', timeout: 2000});
+        await this.pool.query({sql: 'SELECT outbox_id FROM emergency_route_outbox LIMIT 0', timeout: 2000});}
+      catch {reasons.push('MySQL or route schema unavailable');}
     }
     if (this.weights) {
       try {const snapshot = await this.weights.loadDensitySnapshot(); if (snapshot.degraded) degraded.push(snapshot.edgeDensity);}
@@ -199,8 +197,7 @@ export class Worker {
     if (!finished) this.health.forceClose();
     for (const connection of this.connections) connection.disconnect();
     if (this.pool) {
-      this.pool.off('error', this.onPoolError);
-      if (!this.dependencies.pool) void this.pool.end().catch(error => this.log.error('PostgreSQL shutdown failed', error));
+      if (!this.dependencies.pool) void this.pool.end().catch(error => this.log.error('MySQL shutdown failed', error));
     }
     const drained = finished && this.consumers.every(consumer => consumer.drained);
     this.log.info('Emergency Worker stopped', {drained});

@@ -4,7 +4,7 @@ describe('worker configuration', () => {
   test('defaults keep canonical streams separate from the Gateway projection', () => {
     expect(loadConfig({})).toMatchObject({
       redisUrl: 'redis://localhost:6379', h3Resolution: 9, inactiveTtlMs: 5000,
-      stateStream: 'stream:vehicle:state', emergencyStream: 'stream:emergency:event',
+      stateStream: 'stream:vehicle:state', emergencyStream: 'evacs:stream:emergency-event',
       alertStream: 'stream:alert:event', gatewayAlertStream: 'evacs:stream:yield-alert',
       routeIntervalMs: 2000, alertTtlMs: 20000, healthPort: 8082,
       routePersistenceEnabled: true,
@@ -21,9 +21,9 @@ describe('worker configuration', () => {
   });
   test('allows explicit streams and positive alert TTL', () => {
     expect(loadConfig({ALERT_TTL_MS: '1', ALERT_STREAM: 'canonical', EVACS_ALERT_STREAM: 'gateway',
-      DATABASE_URL: 'postgres://db/evacs', GRAPH_PATH: '/graph.json', ROUTE_PERSISTENCE_ENABLED: 'false'}))
+      DATABASE_URL: 'mysql://db/evacs', GRAPH_PATH: '/graph.json', ROUTE_PERSISTENCE_ENABLED: 'false'}))
       .toMatchObject({alertTtlMs: 1, alertStream: 'canonical', gatewayAlertStream: 'gateway',
-        databaseUrl: 'postgres://db/evacs', graphPath: '/graph.json', routePersistenceEnabled: false});
+        databaseUrl: 'mysql://db/evacs', graphPath: '/graph.json', routePersistenceEnabled: false});
   });
   test('aggregates invalid configuration rather than partially accepting it', () => {
     try { loadConfig({H3_RESOLUTION: '16', MAX_DELIVERIES: '0', HEALTH_PORT: '65536',

@@ -4,7 +4,8 @@ import {isValidCell} from 'h3-js';
 export const EVENT_FIELD = 'event';
 export const GATEWAY_PAYLOAD_FIELD = 'payload';
 export const STATE_STREAM = 'stream:vehicle:state';
-export const EMERGENCY_STREAM = 'stream:emergency:event';
+/** Control API Server Outbox stream (EVACS-API-Server `evacs.redis.emergency-stream`). */
+export const EMERGENCY_STREAM = 'evacs:stream:emergency-event';
 export const ALERT_STREAM = 'stream:alert:event';
 export const GATEWAY_ALERT_STREAM = 'evacs:stream:yield-alert';
 export const DLQ_STREAM = 'stream:emergency-worker:dlq';
@@ -21,6 +22,9 @@ export const DENSITY_META_KEY = 'density:meta';
 export const DENSITY_GENERATION_FIELD = '_generation';
 export const ROUTE_OUTBOX_TABLE = 'emergency_route_outbox';
 export const DISPATCH_ROUTE_TABLE = 'dispatch_route';
+/** Read by the Control API Server (`EVACS_CONE_KEY_PATTERN`); %s is the emergency ID. */
+export const CONE_PROJECTION_KEY_PATTERN = 'evacs:emergency:%s:cone';
+export const CONE_PROJECTION_TTL_MS = 600_000;
 export const vehicleStateKey = (vehicleId: string) => `vehicle:${vehicleId}:state`;
 export const vehicleVersionKey = (vehicleId: string) => `vehicle:${vehicleId}:version`;
 export const cellVehiclesKey = (cellId: string) => `${CELL_KEY_PREFIX}${cellId}`;
@@ -44,7 +48,7 @@ export const ENV = {
   routePersistenceEnabled: 'ROUTE_PERSISTENCE_ENABLED', readCount: 'READ_COUNT', blockMs: 'BLOCK_MS',
   pendingMinIdleMs: 'PENDING_MIN_IDLE_MS', maxDeliveries: 'MAX_DELIVERIES', dlqMaxlen: 'DLQ_MAXLEN',
   alertStreamMaxlen: 'ALERT_STREAM_MAXLEN', shutdownDrainTimeoutMs: 'SHUTDOWN_DRAIN_TIMEOUT_MS',
-  healthPort: 'HEALTH_PORT', bprAlpha: 'BPR_ALPHA', bprBeta: 'BPR_BETA',
+  healthPort: 'HEALTH_PORT', bprAlpha: 'BPR_ALPHA', bprBeta: 'BPR_BETA', coneKeyPattern: 'EVACS_CONE_KEY_PATTERN',
   roadCapacity: 'ROAD_CAPACITY', blockedMultiplier: 'BLOCKED_MULTIPLIER',
 } as const;
 export const ALERT_TTL_MS = 20_000;
@@ -55,6 +59,8 @@ export const STATE_EVENT_PRODUCER = 'location-worker';
 export const WORKER_EVENT_PRODUCER = 'emergency-worker';
 export const STATE_EVENT_TYPE = 'VEHICLE_STATE_UPDATED';
 export const EMERGENCY_CREATED = 'EMERGENCY_CREATED';
+/** Control API Server termination event; not in the design event table, which ends a dispatch by status. */
+export const EMERGENCY_ENDED = 'EMERGENCY_ENDED';
 export const EMERGENCY_DISPATCHED = 'EMERGENCY_DISPATCHED';
 export const EMERGENCY_STATUS_CHANGED = 'EMERGENCY_STATUS_CHANGED';
 export const YIELD_ALERT_REQUESTED = 'YIELD_ALERT_REQUESTED';
@@ -82,9 +88,19 @@ export interface VehicleStateUpdatedPayload {
   stateVersion: number; measuredAt: string;
 }
 export type VehicleStateUpdatedEvent = EventEnvelope<VehicleStateUpdatedPayload, typeof STATE_EVENT_TYPE>;
+/** One point of the route registered with the emergency by the Control API Server. */
+export interface EmergencyRoutePoint extends Coordinates {sequence: number; h3Index?: string; etaSeconds?: number}
+/**
+ * Control API Server EMERGENCY_CREATED. The API has no separate dispatch: an emergency names its vehicle,
+ * so creation also starts the dispatch, identified by the emergency ID. A registration without vehicleId
+ * (design p.100 form, `location` only) starts nothing.
+ */
 export interface EmergencyCreatedPayload {
-  emergencyId: string; emergencyType: string; location: Coordinates; status: 'REGISTERED';
+  emergencyId: string; emergencyType: string; status: string; vehicleId?: string; startedAt?: string;
+  origin?: Coordinates; destination?: Coordinates; location?: Coordinates; route?: EmergencyRoutePoint[];
 }
+/** Control API Server EMERGENCY_ENDED: completes the emergency's dispatches and clears their alerts. */
+export interface EmergencyEndedPayload {emergencyId: string; vehicleId?: string; status: string; endedAt?: string}
 export interface EmergencyDispatchedPayload {
   emergencyId: string; dispatchId: string; vehicleId: string; origin: Coordinates; destination: Coordinates;
 }
@@ -93,6 +109,7 @@ export interface EmergencyStatusChangedPayload {
   currentStatus: InputDispatchStatus; destination?: Coordinates;
 }
 export type EmergencyEvent = EventEnvelope<EmergencyCreatedPayload, typeof EMERGENCY_CREATED>
+  | EventEnvelope<EmergencyEndedPayload, typeof EMERGENCY_ENDED>
   | EventEnvelope<EmergencyDispatchedPayload, typeof EMERGENCY_DISPATCHED>
   | EventEnvelope<EmergencyStatusChangedPayload, typeof EMERGENCY_STATUS_CHANGED>;
 export interface YieldAlertRequestedPayload {
@@ -142,6 +159,8 @@ const point = (value: unknown): boolean => object(value) && typeof value.latitud
 const exact = (value: Record<string, unknown>, fields: readonly string[]) =>
   Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field));
 const strings = (value: Record<string, unknown>, fields: readonly string[]) => fields.every(field => text(value[field]));
+const optional = (value: Record<string, unknown>, field: string, check: (value: unknown) => boolean) =>
+  value[field] === undefined || value[field] === null || check(value[field]);
 
 /** Schema validation only: expiry and configured H3 resolution belong to consumer policy. */
 export function parseEventEnvelope(value: unknown): WorkerEvent {
@@ -157,7 +176,14 @@ export function parseEventEnvelope(value: unknown): WorkerEvent {
         && integer(p.stateVersion, 1) && timestamp(p.measuredAt);
       break;
     case EMERGENCY_CREATED:
-      valid = strings(p, ['emergencyId', 'emergencyType']) && point(p.location) && p.status === 'REGISTERED';
+      valid = strings(p, ['emergencyId', 'emergencyType', 'status']) && optional(p, 'vehicleId', text)
+        && optional(p, 'origin', point) && optional(p, 'destination', point) && optional(p, 'location', point)
+        && optional(p, 'route', value => Array.isArray(value) && value.every(point))
+        // A dispatched vehicle needs somewhere to go: destination, the route's last point, or the location.
+        && (p.vehicleId === undefined || createdDestination(p as unknown as EmergencyCreatedPayload) !== undefined);
+      break;
+    case EMERGENCY_ENDED:
+      valid = strings(p, ['emergencyId', 'status']) && optional(p, 'vehicleId', text);
       break;
     case EMERGENCY_DISPATCHED:
       valid = strings(p, ['emergencyId', 'dispatchId', 'vehicleId']) && point(p.origin) && point(p.destination);
@@ -191,17 +217,49 @@ export function validateEventEnvelope(value: unknown): value is WorkerEvent {
     throw error;
   }
 }
-/** Canonical streams carry one JSON envelope under event; legacy payload is not accepted. */
+/** Route origin/destination of a dispatch started by EMERGENCY_CREATED; route points fill missing ends. */
+export function createdDestination(p: EmergencyCreatedPayload): Coordinates | undefined {
+  const last = p.route?.length ? p.route[p.route.length - 1] : undefined;
+  const value = p.destination ?? last ?? p.location;
+  return value ? {latitude: value.latitude, longitude: value.longitude} : undefined;
+}
+export function createdOrigin(p: EmergencyCreatedPayload): Coordinates | undefined {
+  const value = p.origin ?? p.route?.[0] ?? createdDestination(p);
+  return value ? {latitude: value.latitude, longitude: value.longitude} : undefined;
+}
+
+/** Control API Server field names (BrokerEventPublisher): the envelope is split into stream fields. */
+export const FLAT_ENVELOPE_FIELDS = ['eventId', 'eventType', 'schemaVersion', 'occurredAt', 'producer', 'payload'] as const;
+const toMillisecondIso = (value: string | undefined): string | undefined => {
+  // Java Instant.toString() emits 0, 3, 6 or 9 fraction digits; the canonical envelope keeps milliseconds.
+  if (value === undefined || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value)) return value;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
+};
+
+/**
+ * Two stream layouts are accepted. Worker-to-worker streams carry one JSON envelope under `event`.
+ * The Control API Server writes the same envelope as separate fields with a JSON `payload` (design p.97
+ * common structure); `aggregateType`/`aggregateId` routing hints are ignored.
+ */
 export function parseStreamEvent(fields: readonly string[]): WorkerEvent {
   if (fields.length % 2 !== 0) throw new ContractError('Unpaired stream fields');
-  let raw: string | undefined;
+  const values = new Map<string, string>();
   for (let i = 0; i < fields.length; i += 2) {
-    if (fields[i] !== EVENT_FIELD) continue;
-    if (raw !== undefined) throw new ContractError('Duplicate event field');
-    raw = fields[i + 1];
+    if (values.has(fields[i]!)) throw new ContractError(`Duplicate ${fields[i]} field`);
+    values.set(fields[i]!, fields[i + 1]!);
   }
-  if (raw === undefined) throw new ContractError('Missing event field');
-  let value: unknown;
-  try { value = JSON.parse(raw); } catch { throw new ContractError('Invalid event JSON'); }
-  return parseEventEnvelope(value);
+  const raw = values.get(EVENT_FIELD);
+  if (raw !== undefined) {
+    let value: unknown;
+    try { value = JSON.parse(raw); } catch { throw new ContractError('Invalid event JSON'); }
+    return parseEventEnvelope(value);
+  }
+  if (!values.has('eventType') || !values.has('payload')) throw new ContractError('Missing event field');
+  let payload: unknown;
+  try { payload = JSON.parse(values.get('payload')!); } catch { throw new ContractError('Invalid payload JSON'); }
+  const schemaVersion = values.get('schemaVersion');
+  return parseEventEnvelope({eventId: values.get('eventId'), eventType: values.get('eventType'),
+    schemaVersion: schemaVersion !== undefined && /^\d+$/.test(schemaVersion) ? Number(schemaVersion) : schemaVersion,
+    occurredAt: toMillisecondIso(values.get('occurredAt')), producer: values.get('producer'), payload});
 }

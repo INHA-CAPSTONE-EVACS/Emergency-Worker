@@ -11,11 +11,11 @@ import {RedisStreamEventPublisher} from '../../../src/publishing/redis-stream-ev
 import {DENSITY_CELLS_KEY, DENSITY_EDGES_KEY, DENSITY_META_KEY, dispatchDecisionsKey, vehicleStateKey, parseStreamEvent} from '../../../src/domain/contracts';
 import {loadConfig} from '../../../src/config/config';
 import {redisFixture, decision} from '../store/fixtures';
-import {postgresFixture, dispatch, input} from './fixtures';
+import {mysqlFixture, dispatch, input} from './fixtures';
 import graphDocument from '../../fixtures/road-graph.json';
 
 describe('Slow-Path scheduler', () => {
-  const pool = postgresFixture(), {redis, close} = redisFixture();
+  const pool = mysqlFixture(), {redis, close} = redisFixture();
   const config = loadConfig({BPR_ALPHA: '0.5', BPR_BETA: '2', ROAD_CAPACITY: '10', BLOCKED_MULTIPLIER: '3'});
   const repository = new DispatchRouteRepository(pool), dispatches = new DispatchStateStore(redis, config);
   const vehicles = new VehicleIndexReader(redis), weights = new EdgeWeightCalculator(redis, config);

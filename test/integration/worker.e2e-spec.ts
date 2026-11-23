@@ -1,6 +1,6 @@
 import {latLngToCell} from 'h3-js';
 import {connect} from 'node:net';
-import {Pool} from 'pg';
+import {createPool, type RowDataPacket} from 'mysql2/promise';
 import Redis from 'ioredis';
 import {loadConfig} from '../../src/config/config';
 import {Worker} from '../../src/worker';
@@ -14,7 +14,7 @@ import {RouteScheduler} from '../../src/route/route-scheduler';
 import {HealthServer} from '../../src/infra/health-server';
 import {DispatchStateStore} from '../../src/store/dispatch-state-store';
 import {redisFixture, decision} from './store/fixtures';
-import {postgresFixture, dispatch, input} from './route/fixtures';
+import {mysqlFixture, dispatch, input} from './route/fixtures';
 import {target, vehicle} from '../unit/decision/fixtures';
 
 const eventually = async (check: () => Promise<boolean>) => {
@@ -23,7 +23,7 @@ const eventually = async (check: () => Promise<boolean>) => {
   throw new Error('Condition did not become true');
 };
 describe('composed worker', () => {
-  const pool = postgresFixture();
+  const pool = mysqlFixture();
   let fixture: ReturnType<typeof redisFixture>, worker: Worker;
   const config = {...loadConfig({REDIS_URL: process.env.REDIS_URL ?? 'redis://127.0.0.1:6401',
     ROUTE_PERSISTENCE_ENABLED: 'false', BLOCK_MS: '20', PENDING_MIN_IDLE_MS: '20', INACTIVE_TTL_MS: '60000'}), healthPort: 0};
@@ -132,7 +132,7 @@ describe('composed worker', () => {
   });
 
   test('creates and publishes alert intent and acknowledges state while PostgreSQL is unavailable', async () => {
-    const unavailable = new Pool({host: '127.0.0.1', port: 1, connectionTimeoutMillis: 100});
+    const unavailable = createPool({host: '127.0.0.1', port: 1, connectTimeout: 100});
     worker = new Worker({...config, routePersistenceEnabled: true}, {redis: fixture.redis, pool: unavailable, logger: quiet});
     try {
       await worker.start();
@@ -147,7 +147,7 @@ describe('composed worker', () => {
       await eventually(async () => await fixture.redis.xlen(config.gatewayAlertStream) === 1
         && (await fixture.redis.xpending(config.stateStream, config.vehicleConsumerGroup))[0] === 0);
       expect(await fixture.redis.xlen(config.dlqStream)).toBe(0);
-      expect((await worker.readiness()).reasons).toContain('PostgreSQL or route schema unavailable');
+      expect((await worker.readiness()).reasons).toContain('MySQL or route schema unavailable');
     } finally {await worker.stop(); await unavailable.end();}
   });
 
@@ -228,7 +228,7 @@ describe('composed worker', () => {
       {redis: fixture.redis, pool, logger: quiet});
     await worker.start();
     await eventually(async () => (await repository.findLatest(dispatch.dispatchId))?.routeVersion === 2);
-    const clears = (await pool.query("SELECT event_key, event FROM emergency_route_outbox WHERE event->>'eventType' = 'YIELD_ALERT_CLEAR_REQUESTED'")).rows;
+    const clears = (await pool.query<RowDataPacket[]>("SELECT event_key, event FROM emergency_route_outbox WHERE event->>'$.eventType' = 'YIELD_ALERT_CLEAR_REQUESTED'"))[0];
     expect(clears).toEqual([{event_key: `${dispatch.dispatchId}:route:2:YIELD_ALERT_CLEAR_REQUESTED:excluded`,
       event: expect.objectContaining({eventId: `${dispatch.dispatchId}:route:2:YIELD_ALERT_CLEAR_REQUESTED:excluded`,
         payload: {dispatchId: dispatch.dispatchId, alertId: 'alert-excluded', targetVehicleId: 'excluded', reason: 'ROUTE_CHANGED'}})}]);
@@ -275,7 +275,7 @@ describe('composed worker', () => {
     const [row] = await fixture.redis.xrange(config.alertStream, '-', '+');
     expect(parseStreamEvent(row![1])).toMatchObject({eventType: 'ROUTE_UPDATE_REQUESTED',
       payload: {routeVersion: 1, targetVehicleId: 'ambulance', estimatedTravelSeconds: 20}});
-    expect((await pool.query('SELECT road_segments FROM dispatch_route')).rows[0].road_segments).toEqual(['ac', 'cd']);
+    expect((await pool.query<RowDataPacket[]>('SELECT road_segments FROM dispatch_route'))[0][0]!.road_segments).toEqual(['ac', 'cd']);
     expect(await status()).toBe(200);
   });
 
@@ -297,7 +297,7 @@ describe('composed worker', () => {
     expect(await store.findCone(dispatch.dispatchId)).toMatchObject({route: {roadSegments: ['ab', 'bd']}});
     await worker.stop();
     await fixture.redis.del(dispatchConeKey(dispatch.dispatchId));
-    const unavailable = new Pool({host: '127.0.0.1', port: 1, connectionTimeoutMillis: 100});
+    const unavailable = createPool({host: '127.0.0.1', port: 1, connectTimeout: 100});
     worker = new Worker(routed, {redis: fixture.redis, pool: unavailable, logger: quiet});
     try {
       await worker.start();

@@ -3,21 +3,22 @@ import {RouteOutboxDispatcher} from '../../../src/route/route-outbox-dispatcher'
 import {RedisStreamEventPublisher} from '../../../src/publishing/redis-stream-event-publisher';
 import {parseStreamEvent} from '../../../src/domain/contracts';
 import {redisFixture, config} from '../store/fixtures';
-import {postgresFixture, dispatch, input} from './fixtures';
+import {mysqlFixture, dispatch, input} from './fixtures';
 
 describe('append-only route persistence and durable outbox', () => {
-  const pool = postgresFixture();
+  const pool = mysqlFixture();
   const {redis, close} = redisFixture();
   const repository = new DispatchRouteRepository(pool);
   afterAll(close);
   test('migration owns exact route columns and rejects updates/deletes while versions append', async () => {
-    const columns = await pool.query(`SELECT column_name, data_type, is_nullable FROM information_schema.columns
-      WHERE table_schema = current_schema() AND table_name = 'dispatch_route' ORDER BY ordinal_position`);
-    expect(columns.rows).toEqual([
-      ['route_id', 'uuid', 'NO'], ['dispatch_id', 'uuid', 'NO'], ['route_version', 'integer', 'NO'],
-      ['route_coordinates', 'jsonb', 'NO'], ['road_segments', 'jsonb', 'NO'], ['estimated_duration', 'integer', 'NO'],
-      ['change_reason', 'character varying', 'YES'], ['created_at', 'timestamp with time zone', 'NO'],
-    ].map(([column_name, data_type, is_nullable]) => ({column_name, data_type, is_nullable})));
+    const [columns] = await pool.query(`SELECT column_name AS column_name, column_type AS column_type,
+        is_nullable AS is_nullable FROM information_schema.columns
+      WHERE table_schema = DATABASE() AND table_name = 'dispatch_route' ORDER BY ordinal_position`);
+    expect(columns).toEqual([
+      ['route_id', 'char(36)', 'NO'], ['dispatch_id', 'varchar(64)', 'NO'], ['route_version', 'int', 'NO'],
+      ['route_coordinates', 'json', 'NO'], ['road_segments', 'json', 'NO'], ['estimated_duration', 'int', 'NO'],
+      ['change_reason', 'varchar(64)', 'YES'], ['created_at', 'datetime(3)', 'NO'],
+    ].map(([column_name, column_type, is_nullable]) => ({column_name, column_type, is_nullable})));
     expect(await repository.findLatest(dispatch.dispatchId)).toBeNull();
     const first = await repository.saveNewVersionWithOutbox(input());
     const second = await repository.saveNewVersionWithOutbox({...input(), expectedVersion: 1,
@@ -25,16 +26,17 @@ describe('append-only route persistence and durable outbox', () => {
     expect(first?.routeVersion).toBe(1);
     expect(second?.routeVersion).toBe(2);
     expect(await repository.findLatest(dispatch.dispatchId)).toEqual(second);
-    expect((await pool.query('SELECT route_version FROM dispatch_route ORDER BY route_version')).rows).toEqual([{route_version: 1}, {route_version: 2}]);
+    expect((await pool.query('SELECT route_version FROM dispatch_route ORDER BY route_version'))[0]).toEqual([{route_version: 1}, {route_version: 2}]);
     await expect(pool.query('UPDATE dispatch_route SET estimated_duration = 1')).rejects.toThrow(/append-only/);
     await expect(pool.query('DELETE FROM dispatch_route')).rejects.toThrow(/append-only/);
-    await expect(pool.query(`INSERT INTO dispatch_route SELECT gen_random_uuid(), dispatch_id, route_version,
-      route_coordinates, road_segments, estimated_duration, change_reason, created_at FROM dispatch_route LIMIT 1`)).rejects.toThrow(/unique/);
+    await expect(pool.query(`INSERT INTO dispatch_route SELECT * FROM (SELECT UUID(), dispatch_id, route_version,
+      route_coordinates, road_segments, estimated_duration, change_reason, created_at FROM dispatch_route LIMIT 1) AS copy`))
+      .rejects.toThrow(/Duplicate entry/);
   });
   test('concurrent writers with the same expected version produce exactly one version and event', async () => {
     const results = await Promise.all([repository.saveNewVersionWithOutbox(input()), repository.saveNewVersionWithOutbox(input())]);
     expect(results.filter(Boolean)).toHaveLength(1);
-    expect((await pool.query('SELECT * FROM emergency_route_outbox')).rows).toHaveLength(1);
+    expect((await pool.query('SELECT * FROM emergency_route_outbox'))[0]).toHaveLength(1);
   });
   test('replacement and route-change clear commit together; failing outbox insert rolls back route', async () => {
     await repository.saveNewVersionWithOutbox(input());
@@ -47,7 +49,7 @@ describe('append-only route persistence and durable outbox', () => {
     await expect(repository.saveNewVersionWithOutbox({...input(), expectedVersion: 2})).rejects.toThrow();
     expect((await repository.findLatest(dispatch.dispatchId))?.routeVersion).toBe(2);
     expect(await repository.findPendingOutbox()).toHaveLength(3);
-    await pool.query('ALTER TABLE emergency_route_outbox DROP CONSTRAINT reject_insert');
+    await pool.query('ALTER TABLE emergency_route_outbox DROP CHECK reject_insert');
   });
   test('receipt-write failure replays the durable event with the same idempotency key after restart', async () => {
     const stream = 'route-receipt-retry';
