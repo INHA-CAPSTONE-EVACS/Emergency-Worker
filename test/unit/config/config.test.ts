@@ -11,6 +11,11 @@ describe('worker configuration', () => {
       routePersistenceEnabled: true,
     });
   });
+  test('log level defaults to info and accepts debug', () => {
+    expect(loadConfig({}).logLevel).toBe('info');
+    expect(loadConfig({LOG_LEVEL: 'debug'}).logLevel).toBe('debug');
+    expect(() => loadConfig({LOG_LEVEL: 'verbose'})).toThrow(/LOG_LEVEL/);
+  });
   test.each(['999', '3001', '0', 'abc', '2000.5', 'Infinity'])('rejects route cadence %s', value => {
     expect(() => loadConfig({ROUTE_INTERVAL_MS: value})).toThrow(/ROUTE_INTERVAL_MS/);
   });

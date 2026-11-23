@@ -42,7 +42,7 @@ export const ENV = {
   alertStream: 'ALERT_STREAM', dlqStream: 'DLQ_STREAM',
   alertOutboxStream: 'ALERT_OUTBOX_STREAM', vehicleConsumerGroup: 'VEHICLE_CONSUMER_GROUP',
   emergencyConsumerGroup: 'EMERGENCY_CONSUMER_GROUP', consumerName: 'CONSUMER_NAME', instanceId: 'INSTANCE_ID',
-  routeIntervalMs: 'ROUTE_INTERVAL_MS', alertTtlMs: 'ALERT_TTL_MS', graphPath: 'GRAPH_PATH',
+  routeIntervalMs: 'ROUTE_INTERVAL_MS', alertTtlMs: 'ALERT_TTL_MS', graphPath: 'GRAPH_PATH', logLevel: 'LOG_LEVEL',
   routePersistenceEnabled: 'ROUTE_PERSISTENCE_ENABLED', readCount: 'READ_COUNT', blockMs: 'BLOCK_MS',
   pendingMinIdleMs: 'PENDING_MIN_IDLE_MS', maxDeliveries: 'MAX_DELIVERIES', dlqMaxlen: 'DLQ_MAXLEN',
   alertStreamMaxlen: 'ALERT_STREAM_MAXLEN', shutdownDrainTimeoutMs: 'SHUTDOWN_DRAIN_TIMEOUT_MS',
