@@ -75,8 +75,11 @@ The graph must match the simulation's directed roads and H3 cells; the unit-test
 
 ```sh
 npm run build
-npm run graph:build -- ../sumo_scenario/scenario-inhadae/roads.net.xml ../sumo_scenario/scenario-inhadae/road-graph.json
+npm run graph:build -- ../sumo_scenario/scenario-inhadae/roads.net.xml ../sumo_scenario/scenario-inhadae/road-graph.json \
+  --edge-cell-table=../sumo_scenario/scenario-inhadae/edge-cell-table.json
 ```
+
+`--edge-cell-table` also writes the Location Worker's `EDGE_CELL_TABLE_PATH` table (schema v1, `source: "sumo-net"`) from the same graph, so `density:edges` uses the edge IDs the route planner looks up. Each edge's geometry is walked in 1 m steps credited to the H3 cell of each step's midpoint, then scaled so the cell lengths sum to the SUMO lane length. Edges the Location Worker would reject (`lengthM <= 0`, IDs starting with `_`) are omitted rather than invalidating the table. The local compose stack builds both files into the `road-graph` volume on every `up`.
 
 It prints the node/edge counts, skipped edges, and the share of junctions in the largest strongly connected component (routes outside it end `DISCONNECTED`). Conversion rules: junctions become nodes; normal edges with at least one lane open to the SUMO `emergency` vehicle class become edges (internal, crossing and footpath-only edges are dropped); edge IDs stay SUMO edge IDs; `lanes`/`speedLimitMps`/`lengthM` come from the usable lanes; geometry is the middle usable lane's centreline (where SUMO reports vehicles); cells are the resolution-9 H3 cells sampled every 10 m along it. Coordinates are inverted from the network's `+proj=utm` WGS84 projection and `netOffset`; other projections are rejected. Turn restrictions (`<connection>`) are not modelled, so a route may contain a turn SUMO forbids. On the Inha scenario: 45 junctions, 95 edges, 95.6% strongly connected; live vehicles lie within 3.2 m of their reported edge.
 
