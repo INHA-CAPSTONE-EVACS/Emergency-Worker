@@ -44,7 +44,7 @@ node "${EMERGENCY_WORKER_DIR:-Emergency-Worker}/deploy/verify-local.cjs"
 docker compose -f docker-compose.local.yml logs --tail=20 emergency-worker
 ```
 
-The smoke script needs the worker's local `npm ci` and the client adapter's existing `socket.io-client` dependency installed by setup. It checks live `EVACS_*` state from SUMO, registers a unique deterministic ambulance/target pair through the real Gateway, verifies Location Worker state, creates the emergency through the Control API Server (`CONTROL_API_URL`, default `http://127.0.0.1:18090`) so activation comes from its Outbox, checks the dashboard cone, receives `YIELD_ALERT_ISSUED` on the target socket, moves the target behind the ambulance, and checks one canonical clear after the repeated update is acknowledged. It ends the emergency through the API, checks that the dispatch and cone are removed, and closes sockets, leaving uniquely named records for inspection and ordinary vehicle expiry. It does not flush shared Redis or alter other services. This is a synthetic geometry proof alongside live SUMO traffic; it does not assert that a randomly selected SUMO vehicle receives a yield action.
+The smoke script needs the worker's local `npm ci` and the client adapter's existing `socket.io-client` dependency installed by setup. It checks live `EVACS_*` state from SUMO, registers a unique deterministic ambulance/target pair through the real Gateway, verifies Location Worker state, creates the emergency through the Control API Server (`CONTROL_API_URL`, default `http://127.0.0.1:18090`) so activation comes from its Outbox, checks the dashboard cone, reads the canonical `YIELD_ALERT_REQUESTED` for the target from `stream:alert:event`, moves the target behind the ambulance, and checks one canonical clear after the repeated update is acknowledged. It ends the emergency through the API, checks that the dispatch and cone are removed, and closes sockets, leaving uniquely named records for inspection and ordinary vehicle expiry. It does not flush shared Redis or alter other services. This is a synthetic geometry proof alongside live SUMO traffic; it does not assert that a randomly selected SUMO vehicle receives a yield action.
 
 The container runs as the `node` user, includes the Lua scripts beside compiled stores, and installs production dependencies only in the final image. It requires healthy Redis, Location Worker, and MySQL. Health uses `18082`, leaving existing service ports unchanged. SIGINT/SIGTERM stop readers, drain current handlers/scheduler/outboxes up to `SHUTDOWN_DRAIN_TIMEOUT_MS`, and close owned connections. An unfinished handler returns `drained: false` and keeps its input pending.
 
@@ -89,7 +89,6 @@ Density reads atomically consume `density:cells`, `density:edges`, and `density:
 | Emergency input | `evacs:stream:emergency-event` / `emergency-worker:emergency` | Control API Server Outbox: envelope split into `eventId`, `eventType`, `schemaVersion`, `occurredAt`, `producer`, JSON `payload` fields (an `event` JSON envelope is also accepted) |
 | Dashboard cone | `evacs:emergency:{emergencyId}:cone` | `ConeSnapshot` JSON (`emergencyId`, `vehicleId`, `version`, `resolution`, `cells`, `updatedAt`), 10-minute TTL, deleted on completion |
 | Canonical output | `stream:alert:event` | `eventKey` plus `event` JSON for yield issue, clear, or route request |
-| Current Gateway output | `evacs:stream:yield-alert` | `eventKey` plus `payload` JSON with `vehicleId`, `alertVersion`, expiry, details |
 | Alert delivery intent | `stream:emergency-worker:alert-outbox` | Durable Redis decision outbox |
 | Dead letter | `stream:emergency-worker:dlq` | Invalid/expired input or exhausted ordinary retries |
 
@@ -101,7 +100,7 @@ Both outboxes provide **at-least-once** delivery. A crash after Redis accepts a 
 
 The Control API Server has no separate dispatch: an emergency names its vehicle. So `EMERGENCY_CREATED` with a `vehicleId` starts a dispatch whose `dispatchId` **is the emergency ID** (alert, route and history records carry it). Its origin is `origin`, else the first `route` point, else the destination; its destination is `destination`, else the last `route` point, else `location`. A creation with a vehicle but none of these is a contract error (DLQ). A creation without `vehicleId` (design p.100 registration) starts nothing. `EMERGENCY_ENDED` completes every active dispatch of the emergency, queues `EMERGENCY_COMPLETED` clears, and removes the dashboard cone; an end processed first keeps a late creation from activating. The design's `EMERGENCY_DISPATCHED` / `EMERGENCY_STATUS_CHANGED` remain supported on the same stream. Java `Instant` timestamps (up to nanoseconds) are truncated to milliseconds.
 
-The current Gateway consumes yield **issue** payloads only. Canonical `YIELD_ALERT_CLEAR_REQUESTED` and `ROUTE_UPDATE_REQUESTED` publication does **not** establish client clear/route delivery. The existing Gateway/client behavior, downstream deduplication/ledger, REST dispatch creation, and pedestrian access routing require separate owner work. Logs record successful canonical publication with its stable event key; they do not report client receipt.
+The worker publishes only canonical requests to `stream:alert:event`; client delivery is the Alert Worker's job via `ws:vehicle:{id}` and `channel:gateway:{gatewayId}`. Until the Gateway implements that contract, vehicles receive no socket alerts from this worker. The existing Gateway/client behavior, downstream deduplication/ledger, REST dispatch creation, and pedestrian access routing require separate owner work. Logs record successful canonical publication with its stable event key; they do not report client receipt.
 
 ## Verification
 
@@ -113,7 +112,7 @@ npm run typecheck
 npm run build
 ```
 
-Integration tests isolate Redis prefixes and create a throwaway MySQL database per suite (hence the admin URL). The composed-worker suite covers restart after committed alert intent with delivery stopped, Gateway projection, one clear under repeated target movement, bounded drain with pending input, concrete route-change target selection, durable route publication, H3 readiness/pending behavior, Redis disconnect, and MySQL schema failure. Compose validation and the live smoke script supplement the automated suite.
+Integration tests isolate Redis prefixes and create a throwaway MySQL database per suite (hence the admin URL). The composed-worker suite covers restart after committed alert intent with delivery stopped, one clear under repeated target movement, bounded drain with pending input, concrete route-change target selection, durable route publication, H3 readiness/pending behavior, Redis disconnect, and MySQL schema failure. Compose validation and the live smoke script supplement the automated suite.
 
 ## Workspace integration
 
