@@ -56,8 +56,6 @@ async function main() {
     };
     const ambulance = await connect(emergencyVehicleId, 'EMERGENCY');
     const target = await connect(targetVehicleId, 'NORMAL');
-    const alerts = [];
-    target.on('yield.alert', message => alerts.push(message));
     const location = async (socket, vehicleId, latitude, speedMps, sequence) => {
       const ack = await socket.timeout(5000).emitWithAck('location.update', {vehicleId, latitude,
         longitude: 126.65, speedMps, headingDegrees: 0, sequence, measuredAt: new Date().toISOString(),
@@ -78,12 +76,11 @@ async function main() {
       return value.available && value;
     }, 'cone projected for GET /control/emergencies/{id}/cone');
     assert.equal(cone.vehicleId, emergencyVehicleId);
-    await eventually(async () => alerts.length, 'Gateway yield.alert delivery');
-    assert.equal(alerts[0].type, 'YIELD_ALERT_ISSUED');
-    assert.equal(alerts[0].details.payload.targetVehicleId, targetVehicleId);
     const canonical = async () => (await redis.xrevrange('stream:alert:event', '+', '-', 'COUNT', 1000))
       .map(([, fields]) => JSON.parse(fields[fields.indexOf('event') + 1]))
       .filter(value => value.payload.dispatchId === dispatchId);
+    const issued = await eventually(async () => (await canonical()).find(value => value.eventType === 'YIELD_ALERT_REQUESTED'
+      && value.payload.targetVehicleId === targetVehicleId), 'canonical yield request on stream:alert:event');
     await location(target, targetVehicleId, 37.449, 5, 1);
     await eventually(async () => (await canonical()).some(value => value.eventType === 'YIELD_ALERT_CLEAR_REQUESTED'),
       'canonical clear request');
@@ -108,8 +105,8 @@ async function main() {
     await eventually(async () => !await redis.exists(`dispatch:${dispatchId}:state`), 'completion from EMERGENCY_ENDED');
     assert.equal((await control(`/${dispatchId}/cone`)).available, false);
     console.log(JSON.stringify({result: 'PASS', emergencyId: dispatchId, emergencyVehicleId, targetVehicleId,
-      gatewayMessage: alerts[0].type, clearEventKey: clears[0].eventId, coneCells: cone.cells.length,
-      scope: 'Control API create/end → Outbox → Emergency Worker; live SUMO plus deterministic Gateway → Location Worker → Emergency Worker → Gateway alert, canonical clear and dashboard cone'}));
+      requestEventKey: issued.eventId, clearEventKey: clears[0].eventId, coneCells: cone.cells.length,
+      scope: 'Control API create/end → Outbox → Emergency Worker; live SUMO plus deterministic Gateway → Location Worker → Emergency Worker canonical yield request and clear and dashboard cone'}));
   } finally {
     try {
       if (dispatchId) await fetch(`${api}/control/emergencies/${dispatchId}/end`, {method: 'POST'}).catch(() => undefined);

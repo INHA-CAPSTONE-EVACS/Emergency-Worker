@@ -21,7 +21,7 @@ return 1`;
 export class RedisAlertOutboxDispatcher {
   private readonly publisher: EventPublisher;
   constructor(private readonly redis: Redis, private readonly config: Pick<WorkerConfig,
-    'alertOutboxStream' | 'alertStream' | 'readCount' | 'alertStreamMaxlen' | 'gatewayAlertStream'>,
+    'alertOutboxStream' | 'alertStream' | 'readCount' | 'alertStreamMaxlen'>,
     publisher?: EventPublisher) {
     this.publisher = publisher ?? new RedisStreamEventPublisher(redis, config);
   }
