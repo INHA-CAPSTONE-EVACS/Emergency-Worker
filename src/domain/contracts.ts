@@ -6,6 +6,8 @@ export const STATE_STREAM = 'stream:vehicle:state';
 /** Control API Server Outbox stream (EVACS-API-Server `evacs.redis.emergency-stream`). */
 export const EMERGENCY_STREAM = 'evacs:stream:emergency-event';
 export const ALERT_STREAM = 'stream:alert:event';
+/** WebSocket Gateway input: a copy of every ROUTE_UPDATE_REQUESTED published to the alert stream. */
+export const ROUTE_UPDATE_STREAM = 'stream:evacs_route:update';
 export const DLQ_STREAM = 'stream:emergency-worker:dlq';
 export const ALERT_OUTBOX_STREAM = 'stream:emergency-worker:alert-outbox';
 export const VEHICLE_CONSUMER_GROUP = 'emergency-worker:vehicle-state';
@@ -39,7 +41,7 @@ export const DENSITY_META_FIELDS = ['generation', 'generatedAt', 'intervalMs', '
 export const ENV = {
   redisUrl: 'REDIS_URL', databaseUrl: 'DATABASE_URL', h3Resolution: 'H3_RESOLUTION',
   inactiveTtlMs: 'INACTIVE_TTL_MS', stateStream: 'STATE_STREAM', emergencyStream: 'EMERGENCY_STREAM',
-  alertStream: 'ALERT_STREAM', dlqStream: 'DLQ_STREAM',
+  alertStream: 'ALERT_STREAM', routeUpdateStream: 'ROUTE_UPDATE_STREAM', dlqStream: 'DLQ_STREAM',
   alertOutboxStream: 'ALERT_OUTBOX_STREAM', vehicleConsumerGroup: 'VEHICLE_CONSUMER_GROUP',
   emergencyConsumerGroup: 'EMERGENCY_CONSUMER_GROUP', consumerName: 'CONSUMER_NAME', instanceId: 'INSTANCE_ID',
   routeIntervalMs: 'ROUTE_INTERVAL_MS', alertTtlMs: 'ALERT_TTL_MS', graphPath: 'GRAPH_PATH', logLevel: 'LOG_LEVEL',

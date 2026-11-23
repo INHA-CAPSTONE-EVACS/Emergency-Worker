@@ -104,7 +104,8 @@ export class Worker {
       this.pool = this.dependencies.pool ?? createMysql(this.config);
       const repository = new DispatchRouteRepository(this.pool);
       this.weights = new EdgeWeightCalculator(density, this.config);
-      routeOutbox = new RouteOutboxDispatcher(repository, publisher, this.config.alertStream);
+      routeOutbox = new RouteOutboxDispatcher(repository, publisher, this.config.alertStream,
+        this.config.routeUpdateStream);
       this.scheduler = new RouteScheduler({lifecycle, dispatches, vehicles, weights: this.weights,
         planner: new RoutePlanner(graph ?? null, this.weights), repository, stabilizer: new RouteStabilizer(), config: this.config,
         logger: this.log,

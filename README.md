@@ -93,6 +93,7 @@ Density reads atomically consume `density:cells`, `density:edges`, and `density:
 | Emergency input | `evacs:stream:emergency-event` / `emergency-worker:emergency` | Control API Server Outbox: envelope split into `eventId`, `eventType`, `schemaVersion`, `occurredAt`, `producer`, JSON `payload` fields (an `event` JSON envelope is also accepted) |
 | Dashboard cone | `evacs:emergency:{emergencyId}:cone` | `ConeSnapshot` JSON (`emergencyId`, `vehicleId`, `version`, `resolution`, `cells`, `updatedAt`), 10-minute TTL, deleted on completion |
 | Canonical output | `stream:alert:event` | `eventKey` plus `event` JSON for yield issue, clear, or route request |
+| Gateway route output | `stream:evacs_route:update` (`ROUTE_UPDATE_STREAM`) | Same `eventKey` plus `event` JSON, `ROUTE_UPDATE_REQUESTED` only, for the WebSocket Gateway |
 | Alert delivery intent | `stream:emergency-worker:alert-outbox` | Durable Redis decision outbox |
 | Dead letter | `stream:emergency-worker:dlq` | Invalid/expired input or exhausted ordinary retries |
 
@@ -104,7 +105,9 @@ Both outboxes provide **at-least-once** delivery. A crash after Redis accepts a 
 
 The Control API Server has no separate dispatch: an emergency names its vehicle. So `EMERGENCY_CREATED` with a `vehicleId` starts a dispatch whose `dispatchId` **is the emergency ID** (alert, route and history records carry it). Its origin is `origin`, else the first `route` point, else the destination; its destination is `destination`, else the last `route` point, else `location`. A creation with a vehicle but none of these is a contract error (DLQ). A creation without `vehicleId` (design p.100 registration) starts nothing. `EMERGENCY_ENDED` completes every active dispatch of the emergency, queues `EMERGENCY_COMPLETED` clears, and removes the dashboard cone; an end processed first keeps a late creation from activating. The design's `EMERGENCY_DISPATCHED` / `EMERGENCY_STATUS_CHANGED` remain supported on the same stream. Java `Instant` timestamps (up to nanoseconds) are truncated to milliseconds.
 
-The worker publishes only canonical requests to `stream:alert:event`; client delivery is the Alert Worker's job via `ws:vehicle:{id}` and `channel:gateway:{gatewayId}`. Until the Gateway implements that contract, vehicles receive no socket alerts from this worker. The existing Gateway/client behavior, downstream deduplication/ledger, REST dispatch creation, and pedestrian access routing require separate owner work. Logs record successful canonical publication with its stable event key; they do not report client receipt.
+The worker publishes canonical requests to `stream:alert:event` and copies each `ROUTE_UPDATE_REQUESTED` to `stream:evacs_route:update` for the WebSocket Gateway. A route outbox row is marked delivered only after both streams accept it, so a partial failure republishes to both with the same `eventKey`; client delivery is the Alert Worker's job via `ws:vehicle:{id}` and `channel:gateway:{gatewayId}`. Until the Gateway implements that contract, vehicles receive no socket alerts from this worker. The existing Gateway/client behavior, downstream deduplication/ledger, REST dispatch creation, and pedestrian access routing require separate owner work. Logs record successful canonical publication with its stable event key; they do not report client receipt.
+
+WebSocket Gateway 담당자는 [`docs/gateway-route-stream-consumer-guide.md`](docs/gateway-route-stream-consumer-guide.md)를 따릅니다. 기존 Pub/Sub 경로는 레거시 코드로 유지하며, 이 전달 계약의 범위 밖입니다.
 
 ## Verification
 

@@ -6,7 +6,7 @@ describe('worker configuration', () => {
     expect(loadConfig({})).toMatchObject({
       redisUrl: 'redis://localhost:6379', h3Resolution: 9, inactiveTtlMs: 5000,
       stateStream: 'stream:vehicle:state', emergencyStream: 'evacs:stream:emergency-event',
-      alertStream: 'stream:alert:event',
+      alertStream: 'stream:alert:event', routeUpdateStream: 'stream:evacs_route:update',
       routeIntervalMs: 2000, alertTtlMs: 20000, healthPort: 8082,
       routePersistenceEnabled: true,
     });
@@ -27,8 +27,8 @@ describe('worker configuration', () => {
   });
   test('allows explicit streams and positive alert TTL', () => {
     expect(loadConfig({ALERT_TTL_MS: '1', ALERT_STREAM: 'canonical', EVACS_ALERT_STREAM: 'gateway',
-      DATABASE_URL: 'mysql://db/evacs', GRAPH_PATH: '/graph.json', ROUTE_PERSISTENCE_ENABLED: 'false'}))
-      .toMatchObject({alertTtlMs: 1, alertStream: 'canonical',
+      ROUTE_UPDATE_STREAM: 'routes', DATABASE_URL: 'mysql://db/evacs', GRAPH_PATH: '/graph.json', ROUTE_PERSISTENCE_ENABLED: 'false'}))
+      .toMatchObject({alertTtlMs: 1, alertStream: 'canonical', routeUpdateStream: 'routes',
         databaseUrl: 'mysql://db/evacs', graphPath: '/graph.json', routePersistenceEnabled: false});
     // A leftover EVACS_ALERT_STREAM from older deployments is ignored.
     expect(loadConfig({EVACS_ALERT_STREAM: 'gateway'})).not.toHaveProperty('gatewayAlertStream');
