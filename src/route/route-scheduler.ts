@@ -6,6 +6,7 @@ import type {DispatchStateStore} from '../store/dispatch-state-store';
 import type {VehicleIndexReader} from '../store/vehicle-index-reader';
 import {DensitySnapshotError, type EdgeWeightCalculator} from './edge-weight-calculator';
 import type {DispatchRoute, DispatchRouteRepository, FoundRoute, RouteChangeClear} from './dispatch-route-repository';
+import type {Logger} from '../infra/logger';
 import type {RouteStabilizer} from './route-stabilizer';
 
 export interface SchedulerPlanner {
@@ -29,6 +30,8 @@ export interface RouteSchedulerDependencies {
   selectRouteChangeClears(dispatch: DispatchState, previous: DispatchRoute, next: FoundRoute,
     decisions: readonly YieldDecision[]): readonly RouteChangeClear[] | Promise<readonly RouteChangeClear[]>;
   now?: () => number;
+  /** Receives one "Route evaluated" line per dispatch per pass. */
+  logger?: Pick<Logger, 'debug'>;
 }
 const active = (state: DispatchState | null): state is DispatchState => state !== null
   && state.status !== 'COMPLETED' && state.status !== 'CANCELED';
@@ -121,8 +124,10 @@ export class RouteScheduler {
     for (const {dispatch, previous} of inputs) {
       const id = dispatch.dispatchId;
       const [emergency] = await deps.vehicles.getStates([dispatch.emergencyVehicleId]);
+      const log = (fields: Record<string, unknown>) => deps.logger?.debug?.('Route evaluated',
+        {dispatchId: id, emergencyVehicleId: dispatch.emergencyVehicleId, ...fields});
       if (!emergency || emergency.vehicleType !== 'EMERGENCY'
-        || emergency.lastMeasuredAt <= this.now() - deps.config.inactiveTtlMs) continue;
+        || emergency.lastMeasuredAt <= this.now() - deps.config.inactiveTtlMs) {log({outcome: 'VEHICLE_STALE'}); continue;}
       // A new leg must be issued immediately. Costs are comparable only for the same destination.
       const destinationChanged = previous !== null && (previous.destination.latitude !== dispatch.destination.latitude
         || previous.destination.longitude !== dispatch.destination.longitude);
@@ -137,15 +142,21 @@ export class RouteScheduler {
         if (!(error instanceof DensitySnapshotError)) throw error;
         return {outcome: error.configurationBlocked ? 'CONFIGURATION_BLOCKED' : 'TRANSIENT_ERROR', routesCommitted, density, error};
       }
-      if (route.outcome !== 'ROUTE_FOUND') continue;
+      if (route.outcome !== 'ROUTE_FOUND') {log({outcome: 'NO_ROUTE', reason: route.reason}); continue;}
       const baseline = previous ? {remainingSeconds, createdAt: previous.createdAt} : null;
-      if (!destinationChanged && !deps.stabilizer.shouldReplace(baseline, route.estimatedTravelSeconds, this.now())) continue;
+      const verdict = destinationChanged ? 'DESTINATION_CHANGED' : deps.stabilizer.verdict(baseline, route.estimatedTravelSeconds, this.now());
+      const measured = {candidateSeconds: route.estimatedTravelSeconds, remainingSeconds, segments: route.roadSegments.length};
+      if (!destinationChanged && !deps.stabilizer.shouldReplace(baseline, route.estimatedTravelSeconds, this.now())) {
+        log({outcome: 'KEPT', verdict, routeVersion: previous?.routeVersion, ...measured}); continue;
+      }
       const current = await deps.dispatches.findById(id);
-      if (!active(current) || !sameDestination(dispatch, current)) continue;
+      if (!active(current) || !sameDestination(dispatch, current)) {log({outcome: 'SUPERSEDED', verdict}); continue;}
       const clears = previous ? await deps.selectRouteChangeClears(current, previous, route, await deps.dispatches.findDecisions(id)) : [];
       const saved = await deps.repository.saveNewVersionWithOutbox({dispatch: current, route,
         expectedVersion: previous?.routeVersion ?? 0, changeReason: destinationChanged ? 'DESTINATION_CHANGED' : previous ? 'FASTER_ROUTE' : 'INITIAL_ROUTE',
         createdAt: new Date(this.now()).toISOString(), clears});
+      log(saved ? {outcome: 'COMMITTED', verdict, changeReason: saved.changeReason, routeVersion: saved.routeVersion, ...measured}
+        : {outcome: 'SUPERSEDED', verdict});
       if (saved) {
         routesCommitted++;
         await this.cacheRoute(saved, route);

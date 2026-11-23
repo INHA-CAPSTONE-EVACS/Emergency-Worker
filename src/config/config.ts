@@ -1,5 +1,6 @@
 import {hostname} from 'node:os';
 import * as contracts from '../domain/contracts';
+import type {LogLevel} from '../infra/logger';
 
 export interface WorkerConfig {
   redisUrl: string; databaseUrl: string | undefined; h3Resolution: number; inactiveTtlMs: number;
@@ -13,6 +14,8 @@ export interface WorkerConfig {
   roadCapacity: number; blockedMultiplier: number;
   /** Control API Server cone key; must contain %s for the emergency ID. */
   coneKeyPattern: string;
+  /** `debug` adds one "Route evaluated" line per active dispatch per route pass. */
+  logLevel: LogLevel;
 }
 export interface ConfigIssue {variable: string; message: string}
 export class ConfigError extends Error {
@@ -45,6 +48,10 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     issues.push({variable: name, message: 'must be true or false'}); return fallback;
   };
   const e = contracts.ENV;
+  const logLevel = (raw: string | undefined): LogLevel => {
+    if (raw === undefined || raw === 'info' || raw === 'debug') return raw ?? 'info';
+    issues.push({variable: e.logLevel, message: 'must be info or debug'}); return 'info';
+  };
   const host = read('HOSTNAME') ?? hostname();
   const config: WorkerConfig = {
     redisUrl: read(e.redisUrl) ?? 'redis://localhost:6379', databaseUrl: read(e.databaseUrl),
@@ -70,6 +77,7 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     bprBeta: number(e.bprBeta, 4, 1, Number.MAX_VALUE, false),
     roadCapacity: positive(e.roadCapacity, 180), blockedMultiplier: number(e.blockedMultiplier, 10, 1, Number.MAX_VALUE, false),
     coneKeyPattern: read(e.coneKeyPattern) ?? contracts.CONE_PROJECTION_KEY_PATTERN,
+    logLevel: logLevel(read(e.logLevel)),
   };
   if ((config.coneKeyPattern.match(/%s/g) ?? []).length !== 1) {
     issues.push({variable: e.coneKeyPattern, message: 'must contain exactly one %s'});

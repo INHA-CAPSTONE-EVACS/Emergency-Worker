@@ -190,6 +190,35 @@ describe('Slow-Path scheduler', () => {
       await scheduler.stop(); load.mockRestore(); jest.useRealTimers();
     }
   });
+  test('logs every evaluation with its outcome and stabilizer verdict', async () => {
+    const logs: Record<string, unknown>[] = [];
+    const scheduler = makeScheduler(planner, {logger: {debug: (message, fields) => logs.push({message, ...fields})}});
+    await scheduler.tick();
+    await scheduler.tick();
+    now += 5000;
+    await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'lastMeasuredAt', String(now));
+    await scheduler.tick();
+    await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'lastMeasuredAt', String(now - 5000));
+    await scheduler.tick();
+    const common = {message: 'Route evaluated', dispatchId: dispatch.dispatchId, emergencyVehicleId: dispatch.emergencyVehicleId};
+    expect(logs).toEqual([
+      {...common, outcome: 'COMMITTED', verdict: 'INITIAL', changeReason: 'INITIAL_ROUTE', routeVersion: 1,
+        candidateSeconds: expect.any(Number), remainingSeconds: null, segments: expect.any(Number)},
+      {...common, outcome: 'KEPT', verdict: 'HOLD', routeVersion: 1,
+        candidateSeconds: expect.any(Number), remainingSeconds: expect.any(Number), segments: expect.any(Number)},
+      {...common, outcome: 'KEPT', verdict: 'NOT_FASTER', routeVersion: 1,
+        candidateSeconds: expect.any(Number), remainingSeconds: expect.any(Number), segments: expect.any(Number)},
+      {...common, outcome: 'VEHICLE_STALE'},
+    ]);
+  });
+  test('logs an off-route replacement when the vehicle is no longer on the accepted route', async () => {
+    await repository.saveNewVersionWithOutbox(input());
+    await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'latitude', '0', 'longitude', '0.001');
+    const logs: Record<string, unknown>[] = [];
+    await makeScheduler(planner, {logger: {debug: (message, fields) => logs.push({message, ...fields})}}).tick();
+    expect(logs).toEqual([expect.objectContaining({outcome: 'COMMITTED', verdict: 'OFF_ROUTE', remainingSeconds: null,
+      changeReason: 'FASTER_ROUTE', routeVersion: 2})]);
+  });
   test('stale emergency state and disconnected routes leave the database unchanged', async () => {
     await redis.hset(vehicleStateKey(dispatch.emergencyVehicleId), 'lastMeasuredAt', String(now - 5000));
     expect(await makeScheduler().tick()).toMatchObject({outcome: 'SKIPPED', routesCommitted: 0});

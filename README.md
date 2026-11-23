@@ -63,6 +63,7 @@ All configuration names and representative values are in [deploy/.env.example](d
 | `ROUTE_PERSISTENCE_ENABLED` | Default `true`; disabling runs alert Fast-Path without MySQL/routing |
 | `ROUTE_INTERVAL_MS` | Default `2000`, accepted range `1000`–`3000` |
 | `INACTIVE_TTL_MS` / `ALERT_TTL_MS` | Default `5000` / `20000`; eligibility freshness and alert expiry |
+| `LOG_LEVEL` | `info` (default) or `debug`. `debug` logs one `Route evaluated` line per active dispatch per route pass: `outcome` (`COMMITTED`, `KEPT`, `NO_ROUTE`, `VEHICLE_STALE`, `SUPERSEDED`), stabilizer `verdict` (`INITIAL`, `OFF_ROUTE`, `FASTER`, `HOLD`, `NOT_FASTER`, `DESTINATION_CHANGED`), candidate/remaining seconds |
 | `BPR_ALPHA` / `BPR_BETA` | Default `0.15` / `4` for density weights |
 | `ROAD_CAPACITY` / `BLOCKED_MULTIPLIER` | Default `180` vehicles per lane / `10` times free-flow travel time |
 

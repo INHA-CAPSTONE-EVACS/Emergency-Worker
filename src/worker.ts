@@ -13,7 +13,7 @@ import {DispatchLifecycleService} from './dispatch/dispatch-lifecycle-service';
 import {EmergencyEventSubscriber} from './dispatch/emergency-event-subscriber';
 import {VehicleStateSubscriber} from './dispatch/vehicle-state-subscriber';
 import {HealthServer, type HealthStatus} from './infra/health-server';
-import {logger, type Logger} from './infra/logger';
+import {createLogger, type Logger} from './infra/logger';
 import {createMysql} from './infra/mysql';
 import {createRedis} from './infra/redis';
 import {RedisAlertOutboxDispatcher} from './publishing/redis-alert-outbox-dispatcher';
@@ -50,7 +50,7 @@ export class Worker {
   private stopRequested = false;
   private stopping?: Promise<{drained: boolean}>;
   constructor(private readonly config: WorkerConfig, private readonly dependencies: WorkerDependencies = {}) {
-    this.log = dependencies.logger ?? logger;
+    this.log = dependencies.logger ?? createLogger(config.logLevel);
     this.health = new HealthServer(config.healthPort, () => this.readiness());
   }
   get healthUrl(): string {return this.health.url;}
@@ -107,6 +107,7 @@ export class Worker {
       routeOutbox = new RouteOutboxDispatcher(repository, publisher, this.config.alertStream);
       this.scheduler = new RouteScheduler({lifecycle, dispatches, vehicles, weights: this.weights,
         planner: new RoutePlanner(graph ?? null, this.weights), repository, stabilizer: new RouteStabilizer(), config: this.config,
+        logger: this.log,
         selectRouteChangeClears: async (dispatch, _previous, next, activeDecisions) => {
           const states = await vehicles.getStates([dispatch.emergencyVehicleId, ...activeDecisions.map(value => value.targetVehicleId)]);
           const emergency = states.find(value => value.vehicleId === dispatch.emergencyVehicleId);
