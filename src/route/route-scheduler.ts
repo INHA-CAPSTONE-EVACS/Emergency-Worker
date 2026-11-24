@@ -35,6 +35,15 @@ export interface RouteSchedulerDependencies {
 }
 const active = (state: DispatchState | null): state is DispatchState => state !== null
   && state.status !== 'COMPLETED' && state.status !== 'CANCELED';
+/**
+ * Destinations read back from MySQL JSON can differ from the Redis copy in the last bit (e.g. ...062069 vs ...062068),
+ * so exact equality would report a destination change on every pass and bypass the stabilizer.
+ * 1e-9 degrees is about 0.1 mm, far below any real destination change.
+ */
+const COORDINATE_EPSILON_DEGREES = 1e-9;
+export const sameCoordinates = (a: Coordinates, b: Coordinates) =>
+  Math.abs(a.latitude - b.latitude) <= COORDINATE_EPSILON_DEGREES
+  && Math.abs(a.longitude - b.longitude) <= COORDINATE_EPSILON_DEGREES;
 const sameDestination = (a: DispatchState, b: DispatchState) => a.destination.latitude === b.destination.latitude
   && a.destination.longitude === b.destination.longitude && a.emergencyVehicleId === b.emergencyVehicleId;
 
@@ -111,7 +120,11 @@ export class RouteScheduler {
       const dispatch = await deps.dispatches.findById(id);
       if (!active(dispatch)) continue;
       const previous = await deps.repository.findLatest(id);
-      if (previous && previous.routeVersion > dispatch.routeVersion) await this.cacheRoute(previous);
+      // Cache with the Redis destination: the cache script compares it exactly against the MySQL copy.
+      if (previous && previous.routeVersion > dispatch.routeVersion) {
+        await this.cacheRoute(sameCoordinates(previous.destination, dispatch.destination)
+          ? {...previous, destination: dispatch.destination} : previous);
+      }
       inputs.push({dispatch, previous});
     }
     let density: DensitySnapshot;
@@ -129,8 +142,7 @@ export class RouteScheduler {
       if (!emergency || emergency.vehicleType !== 'EMERGENCY'
         || emergency.lastMeasuredAt <= this.now() - deps.config.inactiveTtlMs) {log({outcome: 'VEHICLE_STALE'}); continue;}
       // A new leg must be issued immediately. Costs are comparable only for the same destination.
-      const destinationChanged = previous !== null && (previous.destination.latitude !== dispatch.destination.latitude
-        || previous.destination.longitude !== dispatch.destination.longitude);
+      const destinationChanged = previous !== null && !sameCoordinates(previous.destination, dispatch.destination);
       let route: RouteResult;
       let remainingSeconds: number | null = null;
       try {
