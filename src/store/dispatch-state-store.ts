@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import {getResolution} from 'h3-js';
 import {loadConfig, type WorkerConfig} from '../config/config';
 import {CONE_PROJECTION_TTL_MS, dispatchConeKey, dispatchDecisionsKey, dispatchStateKey, type Coordinates} from '../domain/contracts';
 import type {Cone, DispatchState, RouteResult, YieldDecision} from '../domain/types';
@@ -61,7 +62,8 @@ value.version = version
 redis.call('SET', KEYS[1], cjson.encode(value), 'PX', ARGV[2])
 return version`;
 
-type StoreConfig = Pick<WorkerConfig, 'alertOutboxStream'> & Partial<Pick<WorkerConfig, 'coneKeyPattern' | 'h3Resolution'>>;
+type StoreConfig = Pick<WorkerConfig, 'alertOutboxStream'>
+  & Partial<Pick<WorkerConfig, 'coneKeyPattern' | 'h3Resolution' | 'coneH3Resolution'>>;
 
 export class DispatchStateStore {
   constructor(private readonly redis: Redis, private readonly config: StoreConfig = loadConfig()) {}
@@ -103,8 +105,9 @@ export class DispatchStateStore {
     if (!emergencyId) return;
     const key = this.coneProjectionKey(emergencyId);
     if (!cone.cells.length) { await this.redis.del(key); return; }
+    const resolution = getResolution(cone.cells[0]!) ?? this.config.coneH3Resolution ?? this.config.h3Resolution;
     await this.redis.eval(projectConeScript, 1, key, JSON.stringify({emergencyId, vehicleId,
-      ...(this.config.h3Resolution === undefined ? {} : {resolution: this.config.h3Resolution}),
+      ...(resolution === undefined ? {} : {resolution}),
       cells: cone.cells, updatedAt: new Date().toISOString()}), CONE_PROJECTION_TTL_MS);
   }
 

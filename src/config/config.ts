@@ -3,7 +3,7 @@ import * as contracts from '../domain/contracts';
 import type {LogLevel} from '../infra/logger';
 
 export interface WorkerConfig {
-  redisUrl: string; databaseUrl: string | undefined; h3Resolution: number; inactiveTtlMs: number;
+  redisUrl: string; databaseUrl: string | undefined; h3Resolution: number; coneH3Resolution: number; inactiveTtlMs: number;
   stateStream: string; emergencyStream: string; alertStream: string;
   /** WebSocket Gateway route stream; receives ROUTE_UPDATE_REQUESTED in addition to the alert stream. */
   routeUpdateStream: string;
@@ -55,9 +55,11 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     issues.push({variable: e.logLevel, message: 'must be info or debug'}); return 'info';
   };
   const host = read('HOSTNAME') ?? hostname();
+  const h3Resolution = number(e.h3Resolution, 9, 8, 9);
   const config: WorkerConfig = {
     redisUrl: read(e.redisUrl) ?? 'redis://localhost:6379', databaseUrl: read(e.databaseUrl),
-    h3Resolution: number(e.h3Resolution, 9, 8, 9), inactiveTtlMs: positive(e.inactiveTtlMs, 5000),
+    h3Resolution, coneH3Resolution: number(e.coneH3Resolution, h3Resolution, h3Resolution, 15),
+    inactiveTtlMs: positive(e.inactiveTtlMs, 5000),
     stateStream: read(e.stateStream) ?? contracts.STATE_STREAM,
     emergencyStream: read(e.emergencyStream) ?? contracts.EMERGENCY_STREAM,
     alertStream: read(e.alertStream) ?? contracts.ALERT_STREAM,

@@ -40,6 +40,7 @@ export const VEHICLE_STATE_FIELDS = ['vehicleId', 'vehicleType', 'latitude', 'lo
 export const DENSITY_META_FIELDS = ['generation', 'generatedAt', 'intervalMs', 'ttlMs', 'h3Resolution', 'tableVersion', 'edgeDensity'] as const;
 export const ENV = {
   redisUrl: 'REDIS_URL', databaseUrl: 'DATABASE_URL', h3Resolution: 'H3_RESOLUTION',
+  coneH3Resolution: 'CONE_H3_RESOLUTION',
   inactiveTtlMs: 'INACTIVE_TTL_MS', stateStream: 'STATE_STREAM', emergencyStream: 'EMERGENCY_STREAM',
   alertStream: 'ALERT_STREAM', routeUpdateStream: 'ROUTE_UPDATE_STREAM', dlqStream: 'DLQ_STREAM',
   alertOutboxStream: 'ALERT_OUTBOX_STREAM', vehicleConsumerGroup: 'VEHICLE_CONSUMER_GROUP',

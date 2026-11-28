@@ -38,4 +38,12 @@ describe('MovingConeCalculator', () => {
       .toEqual(calculator.buildCone(vehicle()).cells);
     expect(calculator.diffCells(['b', 'a', 'a'], ['c', 'b', 'c'])).toEqual({added: ['c'], removed: ['a']});
   });
+  test('derives finer resolution-10 route and incoming-edge cells from a resolution-9 road graph', () => {
+    const graph = RoadGraph.load(graphDocument());
+    const fine = new MovingConeCalculator(10);
+    const cone = fine.buildRouteCone(vehicle(), turnRoute, graph);
+    expect(cone.cells.every(cell => getResolution(cell) === 10)).toBe(true);
+    expect(cone.cells).toEqual(expect.arrayContaining([...graph.getCellsForEdge('turn', 10), ...graph.getCellsForEdge('incoming', 10)]));
+    expect(() => new MovingConeCalculator(8).buildRouteCone(vehicle(), turnRoute, graph)).toThrow(/resolution mismatch/i);
+  });
 });

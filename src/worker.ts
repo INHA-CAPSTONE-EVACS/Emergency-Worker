@@ -85,7 +85,7 @@ export class Worker {
       ? RoadGraph.load(JSON.parse(await readFile(this.config.graphPath, 'utf8')), this.config.h3Resolution) : undefined;
     if (this.stopRequested) return;
     const dispatches = new DispatchStateStore(commands, this.config), vehicles = new VehicleIndexReader(commands);
-    const cones = new MovingConeCalculator(this.config.h3Resolution), evaluator = new YieldTargetEvaluator(graph);
+    const cones = new MovingConeCalculator(this.config.coneH3Resolution), evaluator = new YieldTargetEvaluator(graph);
     const lifecycle = new DispatchLifecycleService(commands, dispatches,
       {requestImmediate: id => this.scheduler?.requestImmediate(id)});
     const decisions = new YieldDecisionService(lifecycle, dispatches, new DecisionStore(commands, this.config),

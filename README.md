@@ -59,6 +59,7 @@ All configuration names and representative values are in [deploy/.env.example](d
 | `EVACS_CONE_KEY_PATTERN` | Default `evacs:emergency:%s:cone`; must match the Control API Server's setting |
 | `HEALTH_PORT` | Process default `8082`; supplied local config/Compose use `18082` |
 | `H3_RESOLUTION` | Default `9`; must match Location Worker, density metadata, and graph |
+| `CONE_H3_RESOLUTION` | Default `H3_RESOLUTION` (`H3_RESOLUTION`–`15`); moving cone and dashboard projection resolution (queried against Location Worker's `H3_RESOLUTION` index via parent cells) |
 | `GRAPH_PATH` | Optional validated RoadGraph JSON; unset means `GRAPH_UNAVAILABLE`, no new routes. Root compose default `/graphs/road-graph.json` |
 | `ROUTE_PERSISTENCE_ENABLED` | Default `true`; disabling runs alert Fast-Path without MySQL/routing |
 | `ROUTE_INTERVAL_MS` | Default `2000`, accepted range `1000`–`3000` |

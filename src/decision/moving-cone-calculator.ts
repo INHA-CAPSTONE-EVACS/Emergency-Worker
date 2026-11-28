@@ -31,10 +31,12 @@ export class MovingConeCalculator {
   buildRouteCone(vehicle: VehicleState, route: RouteResult, graph?: RoadGraph): Cone {
     const cone = this.buildCone(vehicle);
     if (!graph || route.outcome !== 'ROUTE_FOUND') return cone;
-    if (graph.h3Resolution !== this.h3Resolution) throw new Error('Road graph H3 resolution mismatch');
+    if (this.h3Resolution < graph.h3Resolution) throw new Error('Road graph H3 resolution mismatch');
     const context = graph.getRouteContext(vehicle, route.roadSegments, cone.distanceM);
     const cells = new Set(cone.cells);
-    for (const edge of [...context.routeEdges, ...context.incomingEdges]) for (const cell of graph.getCellsForEdge(edge.id)) cells.add(cell);
+    for (const edge of [...context.routeEdges, ...context.incomingEdges]) {
+      for (const cell of graph.getCellsForEdge(edge.id, this.h3Resolution)) cells.add(cell);
+    }
     return {...cone, cells: [...cells].sort()};
   }
 

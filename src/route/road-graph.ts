@@ -1,6 +1,6 @@
-import {getResolution, isValidCell} from 'h3-js';
+import {getHexagonEdgeLengthAvg, getResolution, isValidCell, latLngToCell, UNITS} from 'h3-js';
 import type {Coordinates} from '../domain/contracts';
-import {bearingDegrees, headingDifference, projectOnPolyline} from '../decision/geometry';
+import {bearingDegrees, distanceM, headingDifference, projectOnPolyline} from '../decision/geometry';
 
 export interface RoadNode extends Readonly<Coordinates> {readonly id: string}
 export interface RoadEdge {
@@ -24,6 +24,7 @@ export class RoadGraph {
   private readonly edgeIndex: ReadonlyMap<string, RoadEdge>;
   private readonly outgoing: ReadonlyMap<string, readonly RoadEdge[]>;
   private readonly incoming: ReadonlyMap<string, readonly RoadEdge[]>;
+  private readonly derivedCells = new Map<number, Map<string, readonly string[]>>();
 
   private constructor(readonly version: string, readonly h3Resolution: number,
     readonly nodes: readonly RoadNode[], readonly edges: readonly RoadEdge[]) {
@@ -68,7 +69,33 @@ export class RoadGraph {
   getNode(id: string): RoadNode | undefined { return this.nodeIndex.get(id); }
   getEdge(id: string): RoadEdge | undefined { return this.edgeIndex.get(id); }
   getOutgoingEdges(nodeId: string): readonly RoadEdge[] { return this.outgoing.get(nodeId) ?? empty; }
-  getCellsForEdge(id: string): readonly string[] { return this.edgeIndex.get(id)?.cells ?? noCells; }
+  getCellsForEdge(id: string, resolution = this.h3Resolution): readonly string[] {
+    const edge = this.edgeIndex.get(id);
+    if (!edge) return noCells;
+    if (resolution === this.h3Resolution) return edge.cells;
+    if (!Number.isInteger(resolution) || resolution < 0 || resolution > 15) throw new Error('Invalid H3 resolution');
+    let byEdge = this.derivedCells.get(resolution);
+    if (!byEdge) { byEdge = new Map(); this.derivedCells.set(resolution, byEdge); }
+    const cached = byEdge.get(id);
+    if (cached) return cached;
+    const spacingM = Math.max(1, Math.min(10, getHexagonEdgeLengthAvg(resolution, UNITS.m) / 2));
+    const cells = new Set<string>();
+    for (let i = 0; i < edge.geometry.length; i++) {
+      const from = edge.geometry[i]!;
+      cells.add(latLngToCell(from.latitude, from.longitude, resolution));
+      const to = edge.geometry[i + 1];
+      if (!to) break;
+      const steps = Math.ceil(distanceM(from, to) / spacingM);
+      for (let step = 1; step < steps; step++) {
+        const t = step / steps;
+        cells.add(latLngToCell(from.latitude + (to.latitude - from.latitude) * t,
+          from.longitude + (to.longitude - from.longitude) * t, resolution));
+      }
+    }
+    const result = Object.freeze([...cells].sort());
+    byEdge.set(id, result);
+    return result;
+  }
 
   findNearestEdge(position: Coordinates & {headingDegrees?: number}, maxDistanceM = 30, edgeIds?: readonly string[]): RoadEdge | null {
     let nearest: RoadEdge | null = null, nearestDistance = maxDistanceM, nearestHeadingDifference = Infinity;

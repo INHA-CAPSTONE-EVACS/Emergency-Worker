@@ -1,3 +1,4 @@
+import {getResolution, latLngToCell} from 'h3-js';
 import type {Cone, RouteResult, VehicleState} from '../domain/types';
 import type {RoadGraph} from '../route/road-graph';
 import {bearingDegrees, distanceM, headingDifference} from './geometry';
@@ -23,7 +24,9 @@ export class YieldTargetEvaluator {
   }
 
   filterCandidates(emergency: VehicleState, candidates: readonly VehicleState[], cone: Cone, route?: RouteResult): YieldCandidate[] {
+    if (!cone.cells.length) return [];
     const cells = new Set(cone.cells);
+    const coneResolution = getResolution(cone.cells[0]!);
     const emergencyEdge = this.graph?.findNearestEdge(emergency);
     const segments = route?.outcome === 'ROUTE_FOUND' ? route.roadSegments : emergencyEdge ? [emergencyEdge.id] : [];
     const context = this.graph?.getRouteContext(emergency, segments, cone.distanceM);
@@ -31,8 +34,10 @@ export class YieldTargetEvaluator {
     const incomingEdges = new Set(context?.incomingEdges.map(edge => edge.id));
     const result: YieldCandidate[] = [];
     for (const vehicle of candidates) {
-      if (vehicle.vehicleId === emergency.vehicleId || vehicle.vehicleType !== 'NORMAL' || vehicle.status !== 'ACTIVE'
-        || !cells.has(vehicle.h3CellId) || this.isPassed(emergency, vehicle)) continue;
+      if (vehicle.vehicleId === emergency.vehicleId || vehicle.vehicleType !== 'NORMAL' || vehicle.status !== 'ACTIVE') continue;
+      const vehicleCell = getResolution(vehicle.h3CellId) === coneResolution
+        ? vehicle.h3CellId : latLngToCell(vehicle.latitude, vehicle.longitude, coneResolution);
+      if (!cells.has(vehicleCell) || this.isPassed(emergency, vehicle)) continue;
       const difference = headingDifference(emergency.headingDegrees, vehicle.headingDegrees);
       if (difference >= 135) continue;
       const distance = distanceM(emergency, vehicle);

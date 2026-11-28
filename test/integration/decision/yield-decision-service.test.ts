@@ -290,4 +290,23 @@ describe('Fast-Path decision deltas', () => {
     expect(await events()).toHaveLength(1);
     expect(await dispatches.findDecisions(state.dispatchId)).toHaveLength(1);
   });
+
+  test('resolution-10 cone queries resolution-9 vehicle index, handles normal moves, and projects resolution 10', async () => {
+    const fineConfig = {...config, coneH3Resolution: 10};
+    const fineDispatches = new DispatchStateStore(fixture.redis, fineConfig);
+    const graph = RoadGraph.load(graphDocument());
+    service = new YieldDecisionService(lifecycle, fineDispatches, new DecisionStore(fixture.redis, fineConfig),
+      new VehicleIndexReader(fixture.redis), new MovingConeCalculator(10), new YieldTargetEvaluator(graph),
+      new YieldActionResolver(), fineConfig, () => now, graph);
+    await seed(normal());
+    await service.evaluate(state.dispatchId, {route: turnRoute});
+    expect((await events()).map(event => event.payload.targetVehicleId)).toEqual(['target']);
+    const projected = JSON.parse((await fixture.redis.get(fineConfig.coneKeyPattern.replace('%s', state.emergencyId)))!);
+    expect(projected.resolution).toBe(10);
+    await seed(normal({speedMps: 10}));
+    await service.onNormalVehicleMoved('target');
+    expect((await fineDispatches.findDecisions(state.dispatchId))[0]).toMatchObject({
+      targetVehicleId: 'target', decisionVersion: 2, estimatedArrivalSeconds: 20,
+    });
+  });
 });

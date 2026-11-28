@@ -1,8 +1,9 @@
 import {createHash} from 'node:crypto';
+import {cellToParent, getResolution, latLngToCell} from 'h3-js';
 import type {WorkerConfig} from '../config/config';
 import {WORKER_EVENT_PRODUCER, YIELD_ALERT_CLEAR_REQUESTED, YIELD_ALERT_REQUESTED,
   type ClearReason, type Coordinates, type VehicleStateUpdatedEvent} from '../domain/contracts';
-import type {Cone, DecisionDiff, DispatchState, OutboxRecord, RouteResult, YieldDecision} from '../domain/types';
+import type {Cone, DecisionDiff, DispatchState, OutboxRecord, RouteResult, VehicleState, YieldDecision} from '../domain/types';
 import type {DispatchLifecycleService} from '../dispatch/dispatch-lifecycle-service';
 import type {VehicleStateFastPath} from '../dispatch/vehicle-state-subscriber';
 import type {RoadGraph} from '../route/road-graph';
@@ -22,6 +23,13 @@ const routeContextChanged = (cone: ActiveCone, dispatch: DispatchState) => (cone
 const semanticFields = ['alertId', 'emergencyId', 'dispatchId', 'emergencyVehicleId', 'targetVehicleId',
   'approachDirection', 'estimatedArrivalSeconds', 'recommendedAction', 'reason'] as const;
 const sameDecision = (a: YieldDecision, b: YieldDecision) => semanticFields.every(field => a[field] === b[field]);
+const inConeCells = (cone: Cone, vehicle: VehicleState): boolean => {
+  if (!cone.cells.length) return false;
+  const coneResolution = getResolution(cone.cells[0]!);
+  const cell = getResolution(vehicle.h3CellId) === coneResolution
+    ? vehicle.h3CellId : latLngToCell(vehicle.latitude, vehicle.longitude, coneResolution);
+  return cone.cells.includes(cell);
+};
 
 /** Fast-Path computes deltas; only DecisionStore commits decisions and durable delivery intent. */
 export class YieldDecisionService implements VehicleStateFastPath {
@@ -29,8 +37,18 @@ export class YieldDecisionService implements VehicleStateFastPath {
     private readonly dispatches: DispatchStateStore, private readonly decisions: DecisionStore,
     private readonly vehicles: VehicleIndexReader, private readonly cones: MovingConeCalculator,
     private readonly evaluator: YieldTargetEvaluator, private readonly actions: YieldActionResolver,
-    private readonly config: Pick<WorkerConfig, 'inactiveTtlMs' | 'alertTtlMs'>,
+    private readonly config: Pick<WorkerConfig, 'inactiveTtlMs' | 'alertTtlMs'> & Partial<Pick<WorkerConfig, 'h3Resolution'>>,
     private readonly now: () => number = Date.now, private readonly graph?: RoadGraph) {}
+
+  private toIndexCells(cells: readonly string[]): string[] {
+    const indexResolution = this.config.h3Resolution;
+    if (indexResolution === undefined) return [...cells];
+    const mapped = new Set<string>();
+    for (const cell of cells) {
+      mapped.add(getResolution(cell) > indexResolution ? cellToParent(cell, indexResolution) : cell);
+    }
+    return [...mapped];
+  }
 
   async onEmergencyState(_event: VehicleStateUpdatedEvent, dispatch: DispatchState): Promise<void> {
     await this.evaluate(dispatch.dispatchId);
@@ -52,7 +70,7 @@ export class YieldDecisionService implements VehicleStateFastPath {
       if (!cone) continue;
       // An alerted target must also be examined after leaving the cone or becoming inactive.
       const previous = await this.dispatches.findDecisions(dispatch.dispatchId);
-      if (routeContextChanged(cone, dispatch) || (target && cone.cells.includes(target.h3CellId))
+      if (routeContextChanged(cone, dispatch) || (target && inConeCells(cone, target))
         || previous.some(value => value.targetVehicleId === vehicleId)) {
         await this.evaluate(dispatch.dispatchId, {targetVehicleId: vehicleId});
       }
@@ -90,7 +108,7 @@ export class YieldDecisionService implements VehicleStateFastPath {
           sourceRouteVersion: dispatch.routeVersion, routeDestination: dispatch.destination};
         if (!await this.dispatches.saveCone(dispatchId, cone, emergency.stateVersion, dispatch)) continue;
         // Include former targets in the bulk read to distinguish passing from other removals.
-        ids = [...new Set([...await this.vehicles.findVehicleIdsInCells(cone.cells, cutoff),
+        ids = [...new Set([...await this.vehicles.findVehicleIdsInCells(this.toIndexCells(cone.cells), cutoff),
           ...previous.map(value => value.targetVehicleId)])];
       }
       const {states, versions} = await this.vehicles.getStateSnapshot(ids);

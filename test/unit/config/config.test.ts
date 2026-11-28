@@ -4,12 +4,19 @@ describe('worker configuration', () => {
   test('defaults use the canonical alert stream', () => {
     expect(loadConfig({})).not.toHaveProperty('gatewayAlertStream');
     expect(loadConfig({})).toMatchObject({
-      redisUrl: 'redis://localhost:6379', h3Resolution: 9, inactiveTtlMs: 5000,
+      redisUrl: 'redis://localhost:6379', h3Resolution: 9, coneH3Resolution: 9, inactiveTtlMs: 5000,
       stateStream: 'stream:vehicle:state', emergencyStream: 'evacs:stream:emergency-event',
       alertStream: 'stream:alert:event', routeUpdateStream: 'stream:evacs_route:update',
       routeIntervalMs: 2000, alertTtlMs: 20000, healthPort: 8082,
       routePersistenceEnabled: true,
     });
+  });
+  test('coneH3Resolution defaults to h3Resolution and accepts finer resolutions up to 15', () => {
+    expect(loadConfig({H3_RESOLUTION: '8'}).coneH3Resolution).toBe(8);
+    expect(loadConfig({H3_RESOLUTION: '9', CONE_H3_RESOLUTION: '10'})).toMatchObject({h3Resolution: 9, coneH3Resolution: 10});
+    expect(loadConfig({H3_RESOLUTION: '9', CONE_H3_RESOLUTION: '15'}).coneH3Resolution).toBe(15);
+    expect(() => loadConfig({H3_RESOLUTION: '9', CONE_H3_RESOLUTION: '8'})).toThrow(/CONE_H3_RESOLUTION/);
+    expect(() => loadConfig({H3_RESOLUTION: '9', CONE_H3_RESOLUTION: '16'})).toThrow(/CONE_H3_RESOLUTION/);
   });
   test('log level defaults to info and accepts debug', () => {
     expect(loadConfig({}).logLevel).toBe('info');

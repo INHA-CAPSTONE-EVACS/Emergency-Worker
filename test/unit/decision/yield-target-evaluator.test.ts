@@ -62,4 +62,13 @@ describe('YieldTargetEvaluator', () => {
       [target({headingDegrees: 134.99}), target({vehicleId: 'opposing', headingDegrees: 135})], cone, turnRoute);
     expect(result.map(candidate => candidate.vehicle.vehicleId)).toEqual(['target']);
   });
+  test('matches resolution-9 vehicle states against a resolution-10 cone', () => {
+    const graph = RoadGraph.load(graphDocument());
+    const fine = new MovingConeCalculator(10);
+    const connected = target({vehicleId: 'incoming', latitude: 0.002, longitude: -0.0018, headingDegrees: 90});
+    const unrelated = target({vehicleId: 'unconnected', latitude: 0.0021, longitude: -0.0018, headingDegrees: 90});
+    const cone = fine.buildRouteCone(vehicle(), turnRoute, graph);
+    const result = new YieldTargetEvaluator(graph).filterCandidates(vehicle(), [target(), connected, unrelated], cone, turnRoute);
+    expect(result.map(candidate => candidate.vehicle.vehicleId)).toEqual(['target', 'incoming']);
+  });
 });
