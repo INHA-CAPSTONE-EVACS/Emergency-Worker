@@ -270,13 +270,11 @@ describe('composed worker', () => {
       eventType: 'EMERGENCY_DISPATCHED', schemaVersion: 1, producer: 'emergency-service', occurredAt: new Date().toISOString(),
       payload: {dispatchId: dispatch.dispatchId, emergencyId: dispatch.emergencyId, vehicleId: 'ambulance',
         origin: dispatch.origin, destination: dispatch.destination}}));
-    await eventually(async () => await fixture.redis.xlen(config.alertStream) === 1);
-    const [row] = await fixture.redis.xrange(config.alertStream, '-', '+');
-    expect(parseStreamEvent(row![1])).toMatchObject({eventType: 'ROUTE_UPDATE_REQUESTED',
-      payload: {routeVersion: 1, targetVehicleId: 'ambulance', estimatedTravelSeconds: 20}});
     await eventually(async () => await fixture.redis.xlen(config.routeUpdateStream) === 1);
     const [gatewayRow] = await fixture.redis.xrange(config.routeUpdateStream, '-', '+');
-    expect(parseStreamEvent(gatewayRow![1])).toEqual(parseStreamEvent(row![1]));
+    expect(parseStreamEvent(gatewayRow![1])).toMatchObject({eventType: 'ROUTE_UPDATE_REQUESTED',
+      payload: {routeVersion: 1, targetVehicleId: 'ambulance', estimatedTravelSeconds: 20}});
+    expect(await fixture.redis.xlen(config.alertStream)).toBe(0);
     expect((await pool.query<RowDataPacket[]>('SELECT road_segments FROM dispatch_route'))[0][0]!.road_segments).toEqual(['ac', 'cd']);
     expect(await status()).toBe(200);
   });

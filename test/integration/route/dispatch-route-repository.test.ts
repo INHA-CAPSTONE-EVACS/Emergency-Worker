@@ -81,7 +81,7 @@ describe('append-only route persistence and durable outbox', () => {
       routeVersion: 1, waypoints: input().route.waypoints, congestedSegments: [], estimatedTravelSeconds: 100}});
     expect(await repository.findPendingOutbox()).toEqual([]);
   });
-  test('route requests are copied to the gateway stream; clears stay on the alert stream only', async () => {
+  test('route requests go to the gateway stream only; clears stay on the alert stream only', async () => {
     const stream = 'route-copy-alert', gateway = 'route-copy-gateway';
     await repository.saveNewVersionWithOutbox(input());
     await repository.saveNewVersionWithOutbox({...input(), expectedVersion: 1, clears: [{alertId: 'old-alert', targetVehicleId: 'target'}]});
@@ -89,9 +89,9 @@ describe('append-only route persistence and durable outbox', () => {
     expect(await delivery.dispatchPending()).toBe(3);
     const read = async (key: string) => (await redis.xrange(key, '-', '+')).map(([, fields]) => parseStreamEvent(fields));
     expect((await read(stream)).map(event => event.eventType))
-      .toEqual(['ROUTE_UPDATE_REQUESTED', 'ROUTE_UPDATE_REQUESTED', 'YIELD_ALERT_CLEAR_REQUESTED']);
+      .toEqual(['YIELD_ALERT_CLEAR_REQUESTED']);
     const routed = await read(gateway);
-    expect(routed).toEqual((await read(stream)).slice(0, 2));
+    expect(routed.map(event => event.eventType)).toEqual(['ROUTE_UPDATE_REQUESTED', 'ROUTE_UPDATE_REQUESTED']);
     expect(routed.map(event => event.eventType === 'ROUTE_UPDATE_REQUESTED' && event.payload.routeVersion)).toEqual([1, 2]);
   });
   test('a gateway stream failure keeps the record pending and replays it with the same key', async () => {
@@ -105,9 +105,9 @@ describe('append-only route persistence and durable outbox', () => {
     expect(await delivery.dispatchPending()).toBe(1);
     const alerts = (await redis.xrange(stream, '-', '+')).map(([, fields]) => parseStreamEvent(fields));
     const routes = (await redis.xrange(gateway, '-', '+')).map(([, fields]) => parseStreamEvent(fields));
-    expect(alerts).toHaveLength(2);
-    expect(alerts[0]?.eventId).toBe(alerts[1]?.eventId);
-    expect(routes.map(event => event.eventId)).toEqual([alerts[0]?.eventId]);
+    expect(alerts).toEqual([]);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({eventType: 'ROUTE_UPDATE_REQUESTED', payload: {routeVersion: 1}});
     expect(await repository.findPendingOutbox()).toEqual([]);
   });
 });
