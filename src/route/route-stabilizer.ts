@@ -8,9 +8,9 @@ export class RouteStabilizer {
   verdict(previous: RouteBaseline | null, candidateSeconds: number, nowMs: number): RouteVerdict {
     if (!Number.isFinite(candidateSeconds) || candidateSeconds < 0 || !Number.isFinite(nowMs)) return 'INVALID';
     if (!previous) return 'INITIAL';
-    if (nowMs - Date.parse(previous.createdAt) < 5000) return 'HOLD';
     // A disconnected, blocked, or obsolete suffix has no usable baseline from the current origin.
     if (previous.remainingSeconds === null) return 'OFF_ROUTE';
+    if (nowMs - Date.parse(previous.createdAt) < 5000) return 'HOLD';
     return previous.remainingSeconds > 0 && candidateSeconds <= previous.remainingSeconds * 0.85 ? 'FASTER' : 'NOT_FASTER';
   }
 

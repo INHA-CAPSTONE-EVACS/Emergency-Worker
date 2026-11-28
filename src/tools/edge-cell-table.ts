@@ -13,7 +13,7 @@ export interface EdgeCellTableDocument {
   graphVersion: string;
   /** Published by the Location Worker as `density:meta.tableVersion`. */
   generatedAt: string;
-  edges: Record<string, {lengthM: number; lanes: number; cells: Record<string, number>}>;
+  edges: Record<string, {lengthM: number; lanes: number; cells: Record<string, number>; geometry?: readonly Coordinates[]}>;
 }
 
 const round = (value: number) => Math.round(value * 1000) / 1000;
@@ -55,7 +55,13 @@ export function buildEdgeCellTable(graph: RoadGraphDocument, generatedAt: string
       const scaled = round(length * scale);
       if (scaled > 0) cells[cell] = scaled;
     }
-    if (Object.keys(cells).length) edges[edge.id] = {lengthM: edge.lengthM, lanes: edge.lanes, cells};
+    if (Object.keys(cells).length) {
+      const entry: EdgeCellTableDocument['edges'][string] = {lengthM: edge.lengthM, lanes: edge.lanes, cells};
+      if (edge.geometry.length >= 2) {
+        entry.geometry = edge.geometry.map(p => ({latitude: p.latitude, longitude: p.longitude}));
+      }
+      edges[edge.id] = entry;
+    }
   }
   return {schemaVersion: 1, h3Resolution: resolution, source: 'sumo-net', graphVersion: graph.version, generatedAt, edges};
 }

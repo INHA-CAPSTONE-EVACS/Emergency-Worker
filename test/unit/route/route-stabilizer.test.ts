@@ -10,6 +10,7 @@ describe('RouteStabilizer', () => {
   test.each([
     [null, 20, 0, 'INITIAL'],
     [{remainingSeconds: 100, createdAt: '2026-11-16T12:00:00.000Z'}, 50, Date.parse('2026-11-16T12:00:04.999Z'), 'HOLD'],
+    [{remainingSeconds: null, createdAt: '2026-11-16T12:00:00.000Z'}, 120, Date.parse('2026-11-16T12:00:01.000Z'), 'OFF_ROUTE'],
     [{remainingSeconds: null, createdAt: '2026-11-16T12:00:00.000Z'}, 120, Date.parse('2026-11-16T12:00:05.000Z'), 'OFF_ROUTE'],
     [{remainingSeconds: 100, createdAt: '2026-11-16T12:00:00.000Z'}, 85, Date.parse('2026-11-16T12:00:05.000Z'), 'FASTER'],
     [{remainingSeconds: 100, createdAt: '2026-11-16T12:00:00.000Z'}, 86, Date.parse('2026-11-16T12:00:05.000Z'), 'NOT_FASTER'],

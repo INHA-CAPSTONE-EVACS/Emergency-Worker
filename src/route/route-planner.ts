@@ -1,6 +1,6 @@
 import type {Coordinates} from '../domain/contracts';
 import type {DensitySnapshot, RouteResult} from '../domain/types';
-import {distanceM} from '../decision/geometry';
+import {distanceM, projectOnPolyline} from '../decision/geometry';
 import {DensitySnapshotError, EdgeWeightCalculator} from './edge-weight-calculator';
 import {RoadGraph, type RoadEdge, type RoadNode} from './road-graph';
 
@@ -45,9 +45,9 @@ export class RoutePlanner {
     this.secondsPerMetre = Number.isFinite(bound) ? bound : 0;
   }
 
-  findRoute(origin: string | Coordinates, destination: string | Coordinates, snapshot: DensitySnapshot): RouteResult {
+  findRoute(origin: string | (Coordinates & {headingDegrees?: number}), destination: string | Coordinates, snapshot: DensitySnapshot): RouteResult {
     if (!this.graph) return {outcome: 'NO_ROUTE', reason: 'GRAPH_UNAVAILABLE'};
-    const start = this.endpoint(origin), goal = this.endpoint(destination);
+    const start = this.startEndpoint(origin), goal = this.endpoint(destination);
     if (!start || !goal) return {outcome: 'NO_ROUTE', reason: 'INVALID_ENDPOINT'};
     if (snapshot.h3Resolution !== this.graph.h3Resolution) {
       throw new DensitySnapshotError('H3_RESOLUTION_MISMATCH', 'Graph and density H3 resolution mismatch');
@@ -59,8 +59,7 @@ export class RoutePlanner {
       if (current.seconds !== costs.get(current.id)) continue;
       if (current.id === goal.id) return this.result(start, goal, previous, current.seconds, snapshot);
       for (const edge of this.graph.getOutgoingEdges(current.id)) {
-        if (this.weights.isBlocked(edge, snapshot)) continue;
-        const seconds = current.seconds + this.weights.weight(edge, snapshot);
+        const seconds = current.seconds + this.edgeCost(edge, snapshot);
         if (seconds >= (costs.get(edge.to) ?? Infinity)) continue;
         costs.set(edge.to, seconds); previous.set(edge.to, edge);
         queue.push({id: edge.to, seconds, priority: seconds + this.heuristic(this.graph.getNode(edge.to)!, goal)});
@@ -70,11 +69,11 @@ export class RoutePlanner {
   }
 
   /** Price the accepted directed suffix from the same snapped endpoints used by findRoute. */
-  estimateRemainingSeconds(origin: Coordinates, destination: Coordinates, segments: readonly string[],
+  estimateRemainingSeconds(origin: Coordinates & {headingDegrees?: number}, destination: Coordinates, segments: readonly string[],
     snapshot: DensitySnapshot): number | null {
     const graph = this.graph;
     if (!graph) return null;
-    const start = this.endpoint(origin), goal = this.endpoint(destination);
+    const start = this.startEndpoint(origin), goal = this.endpoint(destination);
     if (!start || !goal) return null;
     if (start.id === goal.id) return 0;
     const first = segments.findIndex(id => graph.getEdge(id)?.from === start.id);
@@ -82,8 +81,8 @@ export class RoutePlanner {
     let node = start.id, seconds = 0;
     for (const id of segments.slice(first)) {
       const edge = graph.getEdge(id);
-      if (!edge || edge.from !== node || this.weights.isBlocked(edge, snapshot)) return null;
-      seconds += this.weights.weight(edge, snapshot);
+      if (!edge || edge.from !== node) return null;
+      seconds += this.edgeCost(edge, snapshot);
       node = edge.to;
     }
     return node === goal.id ? seconds : null;
@@ -97,7 +96,32 @@ export class RoutePlanner {
     });
   }
 
+  /** Blocked edges stay traversable with a heavy fixed delay so detours win without causing DISCONNECTED. */
+  private edgeCost(edge: RoadEdge, snapshot: DensitySnapshot): number {
+    const base = this.weights.weight(edge, snapshot);
+    return this.weights.isBlocked(edge, snapshot) ? base + 180 : base;
+  }
+
   private heuristic(node: RoadNode, goal: RoadNode): number {return distanceM(node, goal) * this.secondsPerMetre;}
+
+  private startEndpoint(value: string | (Coordinates & {headingDegrees?: number})): RoadNode | undefined {
+    if (typeof value === 'string') return this.graph!.getNode(value);
+    if (!Number.isFinite(value.latitude) || Math.abs(value.latitude) > 90
+      || !Number.isFinite(value.longitude) || Math.abs(value.longitude) > 180) return undefined;
+    const nearestEdge = this.graph!.findNearestEdge(value, 30);
+    if (nearestEdge) {
+      const fromNode = this.graph!.getNode(nearestEdge.from);
+      const toNode = this.graph!.getNode(nearestEdge.to);
+      if (fromNode && toNode) {
+        const projection = projectOnPolyline(value, nearestEdge.geometry);
+        if (distanceM(value, fromNode) > 5 && projection.remainingFraction < 0.95) {
+          return toNode;
+        }
+        return fromNode;
+      }
+    }
+    return this.endpoint(value);
+  }
 
   private endpoint(value: string | Coordinates): RoadNode | undefined {
     if (typeof value === 'string') return this.graph!.getNode(value);

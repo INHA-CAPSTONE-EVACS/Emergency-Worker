@@ -34,10 +34,12 @@ describe('RoutePlanner', () => {
     expect(new RoutePlanner(graph, weights).findRoute('a', 'd', {...density({ac: 1e6}),
       edgeDensity: 'disabled:no-table', degraded: true})).toMatchObject({outcome: 'ROUTE_FOUND', roadSegments: ['ac', 'cd']});
   });
-  test('returns typed NO_ROUTE for a disconnected directed destination or all blocked exits', () => {
+  test('returns typed NO_ROUTE for a disconnected directed destination and falls back to penalized route if all exits are blocked', () => {
     const planner = new RoutePlanner(graph, weights);
     expect(planner.findRoute('d', 'a', density())).toEqual({outcome: 'NO_ROUTE', reason: 'DISCONNECTED'});
-    expect(planner.findRoute('a', 'd', density({ab: 20, ac: 20}))).toEqual({outcome: 'NO_ROUTE', reason: 'DISCONNECTED'});
+    expect(planner.findRoute('a', 'd', density({ab: 20, ac: 20}))).toMatchObject({
+      outcome: 'ROUTE_FOUND', roadSegments: ['ac', 'cd'], estimatedTravelSeconds: 220,
+    });
   });
   test('returns typed failure for unavailable graph and invalid endpoint', () => {
     expect(new RoutePlanner(null, weights).findRoute('a', 'd', density())).toEqual({outcome: 'NO_ROUTE', reason: 'GRAPH_UNAVAILABLE'});
@@ -58,5 +60,14 @@ describe('RoutePlanner', () => {
     expect(planner.findRoute({latitude: 0, longitude: 0}, {latitude: 0.001, longitude: 0.001}, density())).toMatchObject({
       outcome: 'ROUTE_FOUND', roadSegments: ['ac', 'cd']});
     expect(planner.findRoute('a', 'a', density())).toMatchObject({outcome: 'ROUTE_FOUND', roadSegments: [], estimatedTravelSeconds: 0, distanceM: 0});
+  });
+  test('snaps mid-link origin forward to the downstream node along heading instead of backtracking', () => {
+    const planner = new RoutePlanner(graph, weights);
+    // Midpoint of edge ab (a=(0,0) -> b=(0.001,0)), heading north (0 deg), closer to a than b (0.00025 vs 0.00075)
+    const origin = {latitude: 0.00025, longitude: 0, headingDegrees: 0};
+    expect(planner.findRoute(origin, 'd', density())).toMatchObject({
+      outcome: 'ROUTE_FOUND', roadSegments: ['bd'],
+    });
+    expect(planner.estimateRemainingSeconds(origin, {latitude: 0.001, longitude: 0.001}, ['ab', 'bd'], density())).toBe(20);
   });
 });

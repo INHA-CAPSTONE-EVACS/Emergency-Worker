@@ -5,7 +5,7 @@ import type {LogLevel} from '../infra/logger';
 export interface WorkerConfig {
   redisUrl: string; databaseUrl: string | undefined; h3Resolution: number; coneH3Resolution: number; inactiveTtlMs: number;
   stateStream: string; emergencyStream: string; alertStream: string;
-  /** WebSocket Gateway route stream; receives ROUTE_UPDATE_REQUESTED in addition to the alert stream. */
+  /** WebSocket Gateway route stream; receives ROUTE_UPDATE_REQUESTED exclusively. */
   routeUpdateStream: string;
   dlqStream: string; alertOutboxStream: string; vehicleConsumerGroup: string; emergencyConsumerGroup: string;
   consumerName: string; instanceId: string; routeIntervalMs: number; alertTtlMs: number;
@@ -77,9 +77,9 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     dlqMaxlen: positive(e.dlqMaxlen, 10000), alertStreamMaxlen: positive(e.alertStreamMaxlen, 100000),
     shutdownDrainTimeoutMs: number(e.shutdownDrainTimeoutMs, 10000, 0, Number.MAX_SAFE_INTEGER),
     healthPort: number(e.healthPort, 8082, 1, 65535),
-    bprAlpha: number(e.bprAlpha, 0.15, 0, Number.MAX_VALUE, false),
-    bprBeta: number(e.bprBeta, 4, 1, Number.MAX_VALUE, false),
-    roadCapacity: positive(e.roadCapacity, 180), blockedMultiplier: number(e.blockedMultiplier, 10, 1, Number.MAX_VALUE, false),
+    bprAlpha: number(e.bprAlpha, 0.6, 0, Number.MAX_VALUE, false),
+    bprBeta: number(e.bprBeta, 2, 1, Number.MAX_VALUE, false),
+    roadCapacity: positive(e.roadCapacity, 40), blockedMultiplier: number(e.blockedMultiplier, 10, 1, Number.MAX_VALUE, false),
     coneKeyPattern: read(e.coneKeyPattern) ?? contracts.CONE_PROJECTION_KEY_PATTERN,
     logLevel: logLevel(read(e.logLevel)),
   };

@@ -20,7 +20,8 @@ describe('edge-cell table for the Location Worker', () => {
   test('a short edge inside one cell puts its whole SUMO length and lanes in that cell', () => {
     const table = buildEdgeCellTable(graph([edge('inside', [{latitude: lat, longitude: lng},
       {latitude: lat, longitude: lng + 0.0001}], 9.5, 2)]), 'now');
-    expect(table.edges.inside).toEqual({lengthM: 9.5, lanes: 2, cells: {[latLngToCell(lat, lng, 9)]: 9.5}});
+    expect(table.edges.inside).toEqual({lengthM: 9.5, lanes: 2, cells: {[latLngToCell(lat, lng, 9)]: 9.5},
+      geometry: [{latitude: lat, longitude: lng}, {latitude: lat, longitude: lng + 0.0001}]});
   });
 
   test('a crossing edge splits its length over the cells it passes, summing to the SUMO length', () => {
