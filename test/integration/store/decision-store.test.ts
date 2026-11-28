@@ -1,7 +1,7 @@
 import {DispatchStateStore} from '../../../src/store/dispatch-state-store';
 import {DecisionStore} from '../../../src/store/decision-store';
 import {RedisAlertOutboxDispatcher} from '../../../src/publishing/redis-alert-outbox-dispatcher';
-import {parseStreamEvent} from '../../../src/domain/contracts';
+import {OUTBOX_RECEIPT_TTL_MS, OUTBOX_RETENTION_MS, parseStreamEvent} from '../../../src/domain/contracts';
 import {redisFixture, config, state, cone, decision, request} from './fixtures';
 
 describe('atomic decision outbox', () => {
@@ -81,7 +81,33 @@ describe('atomic decision outbox', () => {
     expect(fields[fields.indexOf('eventKey') + 1]).toBe(request(d).eventKey);
     expect(parseStreamEvent(fields)).toEqual(request(d).event);
     expect(await redis.exists(`emergency-worker:outbox:delivered:${request(d).eventKey}`)).toBe(1);
+    const ttl = await redis.pttl(`emergency-worker:outbox:delivered:${request(d).eventKey}`);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(OUTBOX_RECEIPT_TTL_MS);
     expect(await redis.xlen(config.alertOutboxStream)).toBe(1);
+  });
+  test('trims delivered outbox entries past retention but never undelivered ones', async () => {
+    const later = () => Date.now() + OUTBOX_RETENTION_MS + 60_000;
+    const first = decision('trim-1'), second = decision('trim-2', 2);
+    await store.compareSaveAndEnqueue(state.dispatchId, 0, [first], [request(first)]);
+    await new RedisAlertOutboxDispatcher(redis, config, undefined, later).dispatchPending();
+    expect(await redis.xlen(config.alertOutboxStream)).toBe(1);
+    await store.compareSaveAndEnqueue(state.dispatchId, 1, [first, second], [request(second)]);
+    await redis.set(config.alertStream, 'wrong-type-injects-XADD-failure');
+    await expect(new RedisAlertOutboxDispatcher(redis, config, undefined, later).dispatchPending()).rejects.toThrow();
+    expect(await redis.xlen(config.alertOutboxStream)).toBe(2);
+    await redis.del(config.alertStream);
+    await new RedisAlertOutboxDispatcher(redis, config, undefined, later).dispatchPending();
+    const remaining = await redis.xrange(config.alertOutboxStream, '-', '+');
+    expect(remaining.map(([, fields]) => fields[fields.indexOf('eventKey') + 1])).toEqual([request(second).eventKey]);
+    expect(await redis.xlen(config.alertStream)).toBe(1);
+  });
+  test('keeps delivered outbox entries within retention', async () => {
+    const d = decision('fresh');
+    await store.compareSaveAndEnqueue(state.dispatchId, 0, [d], [request(d)]);
+    await store.compareSaveAndEnqueue(state.dispatchId, 1, [d, decision('fresh-2', 2)], [request(decision('fresh-2', 2))]);
+    await new RedisAlertOutboxDispatcher(redis, config).dispatchPending();
+    expect(await redis.xlen(config.alertOutboxStream)).toBe(2);
   });
   test('a crash after XADD retries with the same idempotency key', async () => {
     const d = decision('crash');

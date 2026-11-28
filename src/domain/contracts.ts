@@ -52,6 +52,13 @@ export const ENV = {
   roadCapacity: 'ROAD_CAPACITY', blockedMultiplier: 'BLOCKED_MULTIPLIER',
 } as const;
 export const ALERT_TTL_MS = 20_000;
+/**
+ * Delivery receipts only bridge the XADD→checkpoint crash gap; once the cursor passes a record it is never re-read.
+ * The TTL just has to outlive any realistic retry of that gap.
+ */
+export const OUTBOX_RECEIPT_TTL_MS = 600_000;
+/** Delivered alert-outbox entries older than this are trimmed. Undelivered entries are always kept. */
+export const OUTBOX_RETENTION_MS = 600_000;
 export const ROUTE_INTERVAL_MS = 2_000;
 export const STATE_SCHEMA_VERSION = 1;
 export const REQUEST_SCHEMA_VERSION = 1;
